@@ -61,13 +61,25 @@ public struct NaturalMovementCheck: Sendable {
         public var minimumRotation: Double = 3
         /// Above this the estimate is noise / a different situation.
         public var maximumPoseRange: Double = 60
-        /// Required averaged non-planar residual, as a fraction of the
-        /// inter-ocular distance.
-        public var minimumParallax: Double = 0.012
+        /// Absolute floor for the averaged non-planar residual, as a fraction
+        /// of the inter-ocular distance.
+        public var minimumParallax: Double = 0.006
+        /// Parallax grows roughly with sin(rotation), so the main criterion is
+        /// rotation-normalised: parallax / sin(rotation) must reach this.
+        /// Calibrated on the synthetic 3D-head model (≈0.2 at 3–5°) and real
+        /// owner data (0.10–0.20); flat photos stay near noise level.
+        public var minimumParallaxPerSine: Double = 0.06
+        /// The decision uses the median of the most recent valid evaluations
+        /// (rotation ≥ minimum), so one noisy snapshot neither passes nor
+        /// zeroes it.
+        public var smoothingEvaluations = 7
+        public var minimumEvaluations = 3
         /// The averaged residual must also stand out from landmark noise:
         /// its RMS divided by the standard error of the mean (estimated from
-        /// the spread across pairs). Pure noise gives ≈1.
-        public var minimumSignalToNoise: Double = 2.5
+        /// the spread across pairs). Pure noise gives ≈1 (flat photos in the
+        /// tests: 0.7–1.3). 2.2 lets a real head turning only ~3° pass within
+        /// ~3 s at 1.5 % landmark noise; 2.5 took 3.5–4 s or longer.
+        public var minimumSignalToNoise: Double = 2.2
         public var minimumPairs = 4
         /// Frames kept (≈3 s at 30 fps).
         public var window = 90
@@ -92,6 +104,8 @@ public struct NaturalMovementCheck: Sendable {
     public private(set) var parallax: Double = 0
     /// Parallax divided by its own noise estimate.
     public private(set) var signalToNoise: Double = 0
+    /// Recent valid evaluations (rotation, parallax, signal-to-noise).
+    private var recent: [(rotation: Double, parallax: Double, snr: Double)] = []
     private var pairCount = 0
     private var observedCount = 0
 
@@ -104,6 +118,7 @@ public struct NaturalMovementCheck: Sendable {
         signalToNoise = 0
         pairCount = 0
         observedCount = 0
+        recent.removeAll()
     }
 
     public mutating func observe(time: TimeInterval, yawDegrees: Double?, pitchDegrees: Double?,
@@ -128,8 +143,14 @@ public struct NaturalMovementCheck: Sendable {
         guard !samples.isEmpty else { return 0 }
         let t = min(1, duration / config.minimumDuration)
         let r = min(1, rotation / config.minimumRotation)
-        let p = min(1, parallax / config.minimumParallax, signalToNoise / config.minimumSignalToNoise)
+        let p = min(1, parallaxPerSine / config.minimumParallaxPerSine, signalToNoise / config.minimumSignalToNoise)
         return (t + r + p) / 3
+    }
+
+    /// Smoothed parallax divided by sin(smoothed rotation).
+    public var parallaxPerSine: Double {
+        let s = sin(rotation * .pi / 180)
+        return s > 0 ? parallax / s : 0
     }
 
     public var isSatisfied: Bool {
@@ -137,30 +158,50 @@ public struct NaturalMovementCheck: Sendable {
             && duration >= config.minimumDuration
             && rotation >= config.minimumRotation
             && rotation <= config.maximumPoseRange
-            && pairCount >= config.minimumPairs
+            && recent.count >= config.minimumEvaluations
             && parallax >= config.minimumParallax
+            && parallaxPerSine >= config.minimumParallaxPerSine
             && signalToNoise >= config.minimumSignalToNoise
     }
 
     private mutating func evaluate() {
-        rotation = 0
-        parallax = 0
-        signalToNoise = 0
-        pairCount = 0
-        guard samples.count >= config.minimumSamples else { return }
+        let (rot, par, snr, pairs) = evaluateInstant()
+        pairCount = pairs
+        if rot >= config.minimumRotation && pairs >= config.minimumPairs {
+            recent.append((rot, par, snr))
+            if recent.count > config.smoothingEvaluations { recent.removeFirst(recent.count - config.smoothingEvaluations) }
+        }
+        guard !recent.isEmpty else {
+            rotation = rot
+            parallax = 0
+            signalToNoise = 0
+            return
+        }
+        func median(_ v: [Double]) -> Double {
+            let s = v.sorted()
+            return s.count % 2 == 1 ? s[s.count / 2] : (s[s.count / 2 - 1] + s[s.count / 2]) / 2
+        }
+        rotation = median(recent.map(\.rotation))
+        parallax = median(recent.map(\.parallax))
+        signalToNoise = median(recent.map(\.snr))
+    }
+
+    /// One evaluation over the current window: (rotation, parallax, SNR, pairs).
+    private func evaluateInstant() -> (Double, Double, Double, Int) {
+        guard samples.count >= config.minimumSamples else { return (0, 0, 0, 0) }
         // Use whichever axis varied more.
         let yawSpan = (samples.map(\.yaw).max() ?? 0) - (samples.map(\.yaw).min() ?? 0)
         let pitchSpan = (samples.map(\.pitch).max() ?? 0) - (samples.map(\.pitch).min() ?? 0)
         let angle: (Sample) -> Double = yawSpan >= pitchSpan ? { $0.yaw } : { $0.pitch }
         let sorted = samples.sorted { angle($0) < angle($1) }
         let k = max(2, Int(Double(sorted.count) * config.endFraction))
-        guard sorted.count >= 2 * k else { return }
+        guard sorted.count >= 2 * k else { return (0, 0, 0, 0) }
         let low = Array(sorted.prefix(k))
         let high = Array(sorted.suffix(k).reversed())
         let lowMean = low.map(angle).reduce(0, +) / Double(k)
         let highMean = high.map(angle).reduce(0, +) / Double(k)
-        rotation = highMean - lowMean
-        guard rotation >= config.minimumRotation else { return }
+        let rotation = highMean - lowMean
+        guard rotation >= config.minimumRotation else { return (rotation, 0, 0, 0) }
 
         // Average residual vectors over pairs (k-th lowest with k-th highest).
         let n = low[0].points.count
@@ -177,8 +218,7 @@ public struct NaturalMovementCheck: Sendable {
             }
             pairs += 1
         }
-        pairCount = pairs
-        guard pairs >= 2 else { return }
+        guard pairs >= 2 else { return (rotation, 0, 0, pairs) }
         let kp = Double(pairs)
         var signal = 0.0, noise = 0.0
         for i in 0..<n {
@@ -189,9 +229,10 @@ public struct NaturalMovementCheck: Sendable {
             let vy = max(0, (sumSq[i].dy / kp - my * my) * kp / (kp - 1))
             noise += (vx + vy) / kp
         }
-        parallax = (signal / Double(n)).squareRoot()
+        let parallax = (signal / Double(n)).squareRoot()
         let noiseRMS = (noise / Double(n)).squareRoot()
-        signalToNoise = noiseRMS > 0 ? parallax / noiseRMS : (parallax > 0 ? .infinity : 0)
+        let snr = noiseRMS > 0 ? parallax / noiseRMS : (parallax > 0 ? .infinity : 0)
+        return (rotation, parallax, snr, pairs)
     }
 }
 

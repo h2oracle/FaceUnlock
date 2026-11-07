@@ -14,12 +14,16 @@ public struct FrameObservation: Sendable {
     /// and the inter-ocular distance in the same units. Used for parallax.
     public var landmarks: [CGPoint]?
     public var interocular: Double?
+    /// False when the face is too turned, too small, cut off, low quality or
+    /// couldn't be embedded: such a frame is neither a match nor a non-match.
+    public var usable: Bool
 
     public init(time: TimeInterval, faceCount: Int, score: MatchScore?, eyes: EyeSample?,
                 yawDegrees: Double?, pitchDegrees: Double?,
-                landmarks: [CGPoint]? = nil, interocular: Double? = nil) {
+                landmarks: [CGPoint]? = nil, interocular: Double? = nil, usable: Bool = true) {
         self.landmarks = landmarks
         self.interocular = interocular
+        self.usable = usable
         self.time = time
         self.faceCount = faceCount
         self.score = score
@@ -44,13 +48,15 @@ public struct UnlockEvaluator: Sendable {
         case noFace = "no face"
         case multipleFaces = "several faces"
         case noMatch = "no match"
-        case noEmbedding = "face unreadable"
+        case unusable = "no usable face for too long"
     }
 
     public struct Snapshot: Equatable, Sendable {
         public var faceCount: Int
         public var score: MatchScore?
         public var frameMatched: Bool
+        /// One face, good enough to judge (see `FrameQualityGate`).
+        public var frameUsable: Bool = false
         public var consecutiveMatches: Int
         public var requiredConsecutive: Int
         public var blinkState: BlinkDetector.State
@@ -73,6 +79,7 @@ public struct UnlockEvaluator: Sendable {
         /// non-planar landmark residual (fraction of inter-ocular distance).
         public var motionRotation: Double = 0
         public var motionParallax: Double = 0
+        public var motionSignalToNoise: Double = 0
         public var motionSeconds: Double = 0
         /// Whether the active liveness mode is satisfied right now.
         public var livenessSatisfied: Bool = false
@@ -91,8 +98,13 @@ public struct UnlockEvaluator: Sendable {
     private var lastFaceCount = 0
     private var lastScore: MatchScore?
     private var lastMatched = false
+    private var lastUsable = false
     private var matchesSinceBlink = 0
     private var lastResetReason: ResetReason?
+    /// Start of the current run of no-face / unusable frames.
+    private var gapStart: TimeInterval?
+    /// Short gaps (detector flicker, a blink-induced miss) keep the evidence.
+    public static let maximumGap: TimeInterval = 0.7
     private var lastEyeRatio: Double?
     private(set) public var sawFace = false
     private(set) public var sawMultipleFaces = false
@@ -128,17 +140,27 @@ public struct UnlockEvaluator: Sendable {
         lastFaceCount = frame.faceCount
         lastScore = frame.score
         lastMatched = false
+        lastUsable = frame.faceCount == 1 && frame.usable && frame.score != nil
         lastResetReason = nil
         lastEyeRatio = nil
 
-        if frame.faceCount == 0 {
-            // Face left the frame: someone else could step in, so start over.
-            resetEvidence(.noFace)
-        } else if frame.faceCount > 1 {
+        if frame.faceCount > 1 {
             sawMultipleFaces = true
+            gapStart = nil
             resetEvidence(.multipleFaces)
+        } else if frame.faceCount == 0 || !frame.usable || frame.score == nil {
+            // No usable face: neither a match nor a non-match. Evidence (which
+            // only ever comes from matched frames) survives short gaps; after
+            // `maximumGap` someone else could have stepped in, so start over.
+            if frame.faceCount == 1 { sawFace = true }
+            let start = gapStart ?? frame.time
+            gapStart = start
+            if frame.time - start > Self.maximumGap {
+                resetEvidence(frame.faceCount == 0 ? .noFace : .unusable)
+            }
         } else {
             sawFace = true
+            gapStart = nil
             if let score = frame.score, policy.isMatch(score) {
                 lastMatched = true
                 counter.record(matched: true)
@@ -155,8 +177,8 @@ public struct UnlockEvaluator: Sendable {
                 motion.observe(time: frame.time, yawDegrees: frame.yawDegrees, pitchDegrees: frame.pitchDegrees,
                                landmarks: frame.landmarks, interocular: frame.interocular)
             } else {
-                // Not the owner (or couldn't tell): start over completely.
-                resetEvidence(frame.score == nil ? .noEmbedding : .noMatch)
+                // A usable face that isn't the owner: start over completely.
+                resetEvidence(.noMatch)
             }
         }
         return snapshot
@@ -183,6 +205,7 @@ public struct UnlockEvaluator: Sendable {
             faceCount: lastFaceCount,
             score: lastScore,
             frameMatched: lastMatched,
+            frameUsable: lastUsable,
             consecutiveMatches: counter.run,
             requiredConsecutive: counter.required,
             blinkState: blink.state,
@@ -199,6 +222,7 @@ public struct UnlockEvaluator: Sendable {
             livenessMode: livenessMode,
             motionRotation: motion.rotation,
             motionParallax: motion.parallax,
+            motionSignalToNoise: motion.signalToNoise,
             motionSeconds: motion.duration,
             livenessSatisfied: live,
             progress: unlock ? 1 : (matchProgress + liveProgress) / 2,

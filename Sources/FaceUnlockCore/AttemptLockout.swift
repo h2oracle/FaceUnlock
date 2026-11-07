@@ -4,8 +4,9 @@ import Foundation
 ///
 /// - A *failure* is a "failed look": a single face in view that doesn't
 ///   match for a sustained period (frames with no face never count).
-/// - After `maximumFailures` failures, scanning stops until the display has
-///   gone to sleep and woken again (`displayWoke()`); input doesn't resume it.
+/// - After `maximumFailures` failures, scanning pauses until it is re-armed
+///   (`rearm()`: by a display wake, or by mouse/keyboard input after a
+///   short pause).
 /// - After `maximumTotalFailures` failures in the whole lock session, or one
 ///   typed password that didn't unlock, nothing more is tried until the user
 ///   unlocks manually (`startNewLockSession()`). The same applies once a
@@ -48,9 +49,9 @@ public struct AttemptLockout: Equatable, Sendable {
     public var isLockedOut: Bool {
         passwordRejected || totalFailures >= maximumTotalFailures || faceTimeExhausted
     }
-    /// Stopped until the display sleeps and wakes.
-    public var needsDisplayWake: Bool { failures >= maximumFailures }
-    public var canScan: Bool { !isLockedOut && !needsDisplayWake }
+    /// Paused until re-armed (input after a short pause, or a display wake).
+    public var needsRearm: Bool { failures >= maximumFailures }
+    public var canScan: Bool { !isLockedOut && !needsRearm }
     public var remainingBeforePause: Int { canScan ? min(maximumFailures - failures, maximumTotalFailures - totalFailures) : 0 }
 
     public mutating func recordFailure() {
@@ -62,8 +63,9 @@ public struct AttemptLockout: Equatable, Sendable {
         passwordRejected = true
     }
 
-    /// The display went to sleep and woke again: a fresh set of looks.
-    public mutating func displayWoke() {
+    /// A fresh set of looks (display wake, or input after the pause). The
+    /// lock-session totals and caps are unaffected.
+    public mutating func rearm() {
         failures = 0
     }
 

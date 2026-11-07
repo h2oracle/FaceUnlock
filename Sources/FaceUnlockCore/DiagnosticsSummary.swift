@@ -70,7 +70,8 @@ public struct DiagnosticsSummarizer: Sendable {
         line += " eyes=\(d(opennessMin))..\(d(opennessMax)) ratioMin=\(d(ratioMin, "%.2f"))"
         line += " blink=\(s.blinkState) afterBlink=\(s.matchesSinceBlink)"
         line += String(format: " pose yaw=%.1f° pitch=%.1f°%@", s.yawRange, s.pitchRange, s.poseVaried ? " ok" : "")
-        line += String(format: " motion=%.1fs rot=%.1f° parallax=%.2f%%", s.motionSeconds, s.motionRotation, s.motionParallax * 100)
+        line += String(format: " motion=%.1fs rot=%.1f° parallax=%.2f%% snr=%.1f usable=%@", s.motionSeconds, s.motionRotation,
+                       s.motionParallax * 100, s.motionSignalToNoise, s.frameUsable ? "y" : "n")
         line += " liveness(\(s.livenessMode.rawValue))=\(s.livenessSatisfied ? "ok" : "pending")"
         if !resets.isEmpty {
             let parts = UnlockEvaluator.ResetReason.allCases.compactMap { r in resets[r].map { "\(r.rawValue)×\($0)" } }

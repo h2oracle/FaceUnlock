@@ -165,15 +165,20 @@ window.
 
 **Limits:** each of these counts as a *failed look*:
 
-- a face that doesn't match for 2 s in total. Covering the camera or adding
-  a second face doesn't reset the count;
-- a brief appearance (6+ frames) of a face that never matched;
+- a usable face that doesn't match for 2 s in total. Covering the camera or
+  adding a second face doesn't reset the count;
+- an appearance with at least 1 s of non-matching face that never matched
+  (no-face gaps under 0.7 s don't split an appearance);
 - a face that matches but doesn't pass the liveness check for 6 s (natural
   movement) or 8 s (blink + movement) while the evidence stops improving,
   such as a photo of you.
 
-Frames with no face never count. After 3 failed looks, scanning stops until
-the display sleeps and wakes again. It stops until you unlock manually after
+Frames with no face, or with a face that is too turned, too small, cut off or
+blurry, never count; the indicator asks you to look at the screen. At most
+one failed look is counted every 2 s. After 3 failed looks the indicator
+shows "Face Not Recognised" and scanning pauses. After 2 s, moving the mouse
+or pressing a key (or the display waking) starts it again. It stops until
+you unlock manually after
 5 failed looks in one lock session, after a face has been in view for 2
 minutes in total, or if a typed password didn't unlock the Mac. If the Mac
 sleeps before that is confirmed, it is treated as not unlocked.

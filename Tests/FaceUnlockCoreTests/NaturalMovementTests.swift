@@ -63,6 +63,48 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         }
     }
 
+    @Test func realHeadTurningOnlyAboutThreeDegreesPasses() throws {
+        // Small sway: the two ends of the movement differ by only ~3–4°.
+        let pose: (Double) -> SyntheticFace.Pose = { t in
+            SyntheticFace.Pose(yaw: 2.0 * sin(2 * .pi * 0.7 * t), pitch: 0.8 * sin(2 * .pi * 0.5 * t))
+        }
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: false, seed: UInt64(seed))
+            let r = run(&face, seconds: 6, pose: pose)
+            let t = try #require(r.unlockAt, "seed \(seed): rot \(r.last?.motionRotation ?? -1) par \(r.last?.motionParallax ?? -1)")
+            #expect(t <= 3.0, "seed \(seed): passed at \(t)s")
+        }
+    }
+
+    @Test func photoWithSmallTremorFails() {
+        // The same small-rotation regime, but flat.
+        let pose: (Double) -> SyntheticFace.Pose = { t in
+            SyntheticFace.Pose(yaw: 2.0 * sin(2 * .pi * 0.7 * t), pitch: 0.8 * sin(2 * .pi * 0.5 * t))
+        }
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: true, seed: UInt64(seed))
+            #expect(run(&face, seconds: 10, pose: pose).unlockAt == nil, "seed \(seed)")
+        }
+    }
+
+    @Test func parallaxIsSmoothedAndDoesNotFlipToZero() {
+        var face = SyntheticFace(flat: false, seed: 4)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .off) // keep observing
+        var m = NaturalMovementCheck()
+        var sawValue = false
+        var droppedToZero = false
+        for i in 0..<90 {
+            let t = Double(i) / fps
+            let f = face.frame(time: t, pose: normalHead(t))
+            _ = e.observe(f)
+            m.observe(time: t, yawDegrees: f.yawDegrees, pitchDegrees: f.pitchDegrees,
+                      landmarks: f.landmarks, interocular: f.interocular)
+            if m.parallax > 0 { sawValue = true } else if sawValue { droppedToZero = true }
+        }
+        #expect(sawValue)
+        #expect(!droppedToZero)
+    }
+
     @Test func perfectlyStillRealHeadWaits() {
         var face = SyntheticFace(flat: false)
         #expect(run(&face, seconds: 5, pose: { _ in SyntheticFace.Pose() }).unlockAt == nil)
@@ -180,9 +222,13 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
             let t = Double(i) / 15
             _ = summarizer.observe(e.observe(face.frame(time: t, pose: normalHead(t))), eyeOpenness: nil, at: t)
         }
-        let none = FrameObservation(time: 0.4, faceCount: 0, score: nil, eyes: nil, yawDegrees: nil, pitchDegrees: nil)
-        _ = summarizer.observe(e.observe(none), eyeOpenness: nil, at: 0.4)
-        let line = summarizer.flush(at: 0.45)
+        // No face for longer than the 0.7 s gap allowance resets the evidence.
+        for k in 0..<12 {
+            let t = 0.4 + Double(k) / 15
+            let none = FrameObservation(time: t, faceCount: 0, score: nil, eyes: nil, yawDegrees: nil, pitchDegrees: nil)
+            _ = summarizer.observe(e.observe(none), eyeOpenness: nil, at: t)
+        }
+        let line = summarizer.flush(at: 1.2)
         #expect(line?.contains("resets: no face×1") == true)
     }
 

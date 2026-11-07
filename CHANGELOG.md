@@ -15,8 +15,8 @@ First public release.
   only after mouse/keyboard input.
 - Natural movement uses 3D parallax (homography residuals of the facial
   landmarks as the head turns) to reject flat photos, still or moved.
-- Failed-look lockout that can't be reset by covering the lens: 3 per display
-  wake, 5 per lock session, and a 2-minute face-time cap. It also counts
+- Failed-look lockout that can't be reset by covering the lens: 3 per scan (re-armed by input
+  after a 2 s pause), 5 per lock session, and a 2-minute face-time cap. It also counts
   brief unrecognised appearances and matched-but-not-live faces. It stops
   after a rejected password, including when sleep interrupts the
   confirmation, and pauses the camera after 60 seconds without a face.

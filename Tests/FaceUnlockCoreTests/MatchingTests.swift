@@ -73,17 +73,17 @@ import Testing
 }
 
 @Suite struct AttemptLockoutTests {
-    @Test func threeFailedLooksPauseUntilDisplayWake() {
+    @Test func threeFailedLooksPauseUntilRearmed() {
         var l = AttemptLockout()
         #expect(l.canScan)
         l.recordFailure(); l.recordFailure()
         #expect(l.canScan)
         #expect(l.remainingBeforePause == 1)
         l.recordFailure()
-        #expect(l.needsDisplayWake)
+        #expect(l.needsRearm)
         #expect(!l.canScan)
         #expect(!l.isLockedOut) // only paused, not locked out for the session
-        l.displayWoke()
+        l.rearm()
         #expect(l.canScan)
         #expect(l.totalFailures == 3)
     }
@@ -91,11 +91,11 @@ import Testing
     @Test func hardCapOfFiveFailuresPerLockSession() {
         var l = AttemptLockout()
         for _ in 0..<3 { l.recordFailure() }
-        l.displayWoke()
+        l.rearm()
         l.recordFailure(); l.recordFailure()
         #expect(l.isLockedOut)
         #expect(!l.canScan)
-        l.displayWoke() // a wake doesn't lift the hard cap
+        l.rearm() // a wake doesn't lift the hard cap
         #expect(!l.canScan)
         l.startNewLockSession()
         #expect(l.canScan)
@@ -109,7 +109,7 @@ import Testing
         l.recordFaceTime(0.2)
         #expect(l.faceTimeExhausted)
         #expect(l.isLockedOut)
-        l.displayWoke()
+        l.rearm()
         #expect(!l.canScan)
         l.startNewLockSession()
         #expect(l.canScan)
@@ -121,7 +121,7 @@ import Testing
         l.recordPasswordRejected()
         #expect(l.isLockedOut)
         #expect(!l.canScan)
-        l.displayWoke()
+        l.rearm()
         #expect(!l.canScan)
         l.startNewLockSession()
         #expect(l.canScan)

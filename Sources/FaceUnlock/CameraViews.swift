@@ -171,8 +171,9 @@ extension TestModel {
         let blinkNote = s.livenessMode == .blinkAndMovement ? "" : "  (not required)"
         lines.append("Blink:              \(s.blinked ? "seen ✓" : Self.describe(s.blinkState))\(blinkNote)")
         lines.append(String(format: "Head pose range:    yaw %.1f° pitch %.1f°", s.yawRange, s.pitchRange))
-        lines.append(String(format: "Natural movement:   %.1fs, turn %.1f° (need 3), 3D parallax %.2f%% (need 1.2)",
-                            s.motionSeconds, s.motionRotation, s.motionParallax * 100))
+        lines.append(String(format: "Natural movement:   %.1fs, turn %.1f° (need 3), parallax %.2f%%, S/N %.1f (need 2.2)",
+                            s.motionSeconds, s.motionRotation, s.motionParallax * 100, s.motionSignalToNoise))
+        if s.faceCount == 1 && !s.frameUsable { lines.append("Face not usable:    look straight at the screen") }
         lines.append("Liveness (\(s.livenessMode.title)): \(s.livenessSatisfied ? "✓" : "waiting")")
         self.lines = lines
         if s.shouldUnlock { passed = true }

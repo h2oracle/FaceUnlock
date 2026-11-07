@@ -116,3 +116,33 @@ import Testing
         #expect(steps.count == EnrolmentCollector.steps.count)
     }
 }
+
+@Suite struct FrameQualityGateTests {
+    private func frame(yaw: Double? = 0, pitch: Double? = 0, quality: Float? = 0.6,
+                       box: CGRect = CGRect(x: 0.35, y: 0.3, width: 0.25, height: 0.35)) -> FrameAnalysis {
+        var f = FrameAnalysis(faceCount: 1)
+        f.yawDegrees = yaw
+        f.pitchDegrees = pitch
+        f.captureQuality = quality
+        f.boundingBox = box
+        f.embedding = [1, 0]
+        return f
+    }
+
+    @Test func goodFrameIsUsable() { #expect(frame().isUsable) }
+
+    @Test func badFramesAreNotUsable() {
+        #expect(!frame(yaw: 30).isUsable)
+        #expect(!frame(pitch: -25).isUsable)
+        #expect(!frame(yaw: nil).isUsable)
+        #expect(!frame(quality: 0.1).isUsable)
+        #expect(!frame(box: CGRect(x: 0.4, y: 0.4, width: 0.05, height: 0.07)).isUsable)
+        #expect(!frame(box: CGRect(x: 0.8, y: 0.3, width: 0.25, height: 0.35)).isUsable) // cut off
+        var noEmbedding = frame()
+        noEmbedding.embedding = nil
+        #expect(!noEmbedding.isUsable)
+        var two = frame()
+        two.faceCount = 2
+        #expect(!two.isUsable)
+    }
+}

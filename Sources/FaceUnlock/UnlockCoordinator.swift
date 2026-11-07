@@ -38,6 +38,8 @@ final class UnlockCoordinator {
     static let wakeSettleDelay: TimeInterval = 0.25
     /// After a "not ready" check fails, re-check on ticks only this often.
     static let notReadyRecheck: TimeInterval = 2
+    /// After the per-scan failed-look limit: pause, then input re-arms.
+    static let rearmPause: TimeInterval = 2
 
     private let camera: CameraSession
     private let analyzer: FaceAnalyzer?
@@ -85,6 +87,8 @@ final class UnlockCoordinator {
     private var recordedNotReadyThisSession = false
     private var recordedLockoutThisSession = false
     private var lastBlockedReason: String?
+    /// When input may re-arm scanning after the per-scan failed-look limit.
+    private var rearmAllowedAt: TimeInterval = 0
 
     /// Face ID-style HUD on the lock screen (cosmetic, best effort).
     private let overlay = LockOverlay()
@@ -249,7 +253,7 @@ final class UnlockCoordinator {
         displaySleeping = false
         if wasSleeping && displaySleptDuringLock {
             // A fresh set of looks after sleep → wake.
-            lockout.displayWoke()
+            lockout.rearm()
             displaySleptDuringLock = false
         }
         gate.reset()
@@ -355,10 +359,17 @@ final class UnlockCoordinator {
             }
             return
         }
-        guard !lockout.needsDisplayWake else {
-            blocked("paused until the display sleeps and wakes", detail: "failed looks=\(lockout.failures)")
-            status = "Face not recognised – use your password"
-            return
+        if lockout.needsRearm {
+            // After the pause, a mouse move or key press (or a display wake)
+            // starts a fresh set of looks; the lock-session caps still apply.
+            if trigger == .userInput && now >= rearmAllowedAt {
+                lockout.rearm()
+                diag("re-armed by input")
+            } else {
+                blocked("paused after failed looks; waiting for input", detail: "failed looks=\(lockout.failures)")
+                status = "Face not recognised – move the mouse to try again"
+                return
+            }
         }
         guard gate.shouldStart(on: trigger) else {
             if trigger == .tick {
@@ -416,9 +427,11 @@ final class UnlockCoordinator {
                 let faces = readout.snapshot.faceCount
                 let matched = readout.snapshot.frameMatched
                 let live = readout.snapshot.livenessSatisfied
+                let usable = readout.snapshot.frameUsable
                 let liveProgress = readout.snapshot.livenessProgress
                 Task { @MainActor in
-                    self?.frameObserved(id: id, faceCount: faces, matched: matched, live: live, livenessProgress: liveProgress)
+                    self?.frameObserved(id: id, faceCount: faces, matched: matched, live: live,
+                                        usable: usable, livenessProgress: liveProgress)
                 }
             },
             onDiagnostics: { line in Diagnostics.write("  \(line)") }
@@ -474,25 +487,27 @@ final class UnlockCoordinator {
         if sawFace { record(outcome) }
     }
 
-    private func frameObserved(id: Int, faceCount: Int, matched: Bool, live: Bool, livenessProgress: Double) {
+    private func frameObserved(id: Int, faceCount: Int, matched: Bool, live: Bool, usable: Bool,
+                               livenessProgress: Double) {
         guard id == scanID, processor != nil, var monitor else { return }
         let t = now
         if timing?.firstFrame == nil { timing?.firstFrame = t }
         if faceCount > 0, timing?.firstFace == nil { timing?.firstFace = t }
         let event = monitor.observe(time: t, faceCount: faceCount, matched: matched, live: live,
-                                    livenessProgress: livenessProgress)
+                                    usable: usable, livenessProgress: livenessProgress)
         self.monitor = monitor
         if faceCount > 0 {
             lockout.recordFaceTime(monitor.lastFrameDuration)
             if lockout.faceTimeExhausted {
                 diag("scan ended: face-time limit for this lock session reached (\(Int(lockout.maximumFaceSeconds))s)")
                 endScanRecordingOutcome()
-                overlay.showStopped()
+                overlay.showStopped("Use your password")
                 status = "Stopped (time limit). Unlock manually."
                 return
             }
         }
         overlay.setVisible(monitor.hudVisible(at: t))
+        overlay.setHint(monitor.shouldAskToFaceScreen(at: t) ? "Look at the screen" : nil)
         guard let event else { return }
         failedLook(event)
     }
@@ -505,13 +520,17 @@ final class UnlockCoordinator {
         if lockout.canScan {
             overlay.flashFailure(event == .notLive ? "Couldn't Verify\nLive Face" : "Face Not Recognised")
             status = "Not recognised (\(lockout.remainingBeforePause) look(s) left)"
-        } else {
-            diag("scan ended: too many failed looks")
+        } else if lockout.isLockedOut {
+            diag("scan ended: lock-session failed-look cap reached")
             endScanRecordingOutcome()
-            overlay.showStopped()
-            status = lockout.isLockedOut
-                ? "Stopped after \(lockout.totalFailures) failed looks. Unlock manually."
-                : "Face not recognised – use your password"
+            overlay.showStopped("Use your password")
+            status = "Stopped after \(lockout.totalFailures) failed looks. Unlock manually."
+        } else {
+            diag("scan paused: per-scan failed-look limit; input re-arms after \(Int(Self.rearmPause))s")
+            endScanRecordingOutcome()
+            overlay.flashFailureAndHide()
+            rearmAllowedAt = now + Self.rearmPause
+            status = "Face not recognised – move the mouse to try again"
         }
     }
 

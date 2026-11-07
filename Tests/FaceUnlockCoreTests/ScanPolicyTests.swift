@@ -33,11 +33,13 @@ import Testing
 }
 
 @Suite struct ScanMonitorTests {
-    private func events(_ frames: [(faces: Int, matched: Bool, live: Bool)], fps: Double = 30) -> [ScanMonitor.Event] {
+    private func events(_ frames: [(faces: Int, matched: Bool, live: Bool)], fps: Double = 30,
+                        usable: (Int) -> Bool = { _ in true }) -> [ScanMonitor.Event] {
         var m = ScanMonitor(start: 0)
         var out: [ScanMonitor.Event] = []
         for (i, f) in frames.enumerated() {
-            if let e = m.observe(time: Double(i) / fps, faceCount: f.faces, matched: f.matched, live: f.live) { out.append(e) }
+            if let e = m.observe(time: Double(i) / fps, faceCount: f.faces, matched: f.matched, live: f.live,
+                                 usable: usable(i)) { out.append(e) }
         }
         if let e = m.finish() { out.append(e) }
         return out
@@ -56,25 +58,66 @@ import Testing
     }
 
     @Test func handOverLensDoesNotResetTheCount() {
-        // Attack: 1.9 s of a stranger's face, then one frame with the lens
-        // covered, repeated for 20 s.
+        // Attack: 1.9 s of a stranger's face, then the lens covered for a
+        // moment, repeated for 20 s. At most one failed look per 2 s.
         var frames: [(faces: Int, matched: Bool, live: Bool)] = []
         for _ in 0..<10 { frames += repeated(57) + repeated(1, faces: 0) }
         let e = events(frames)
-        #expect(e.count >= 9, "only \(e.count) failed looks: \(e)")
+        #expect(e.count >= 8, "only \(e.count) failed looks: \(e)")
+    }
+
+    @Test func longerCoveringDoesNotResetTheBucketEither() {
+        // 1.5 s face, 1 s covered (ends the appearance), repeated.
+        var frames: [(faces: Int, matched: Bool, live: Bool)] = []
+        for _ in 0..<8 { frames += repeated(45) + repeated(30, faces: 0) }
+        #expect(events(frames).count >= 5)
     }
 
     @Test func secondFaceDoesNotResetTheCount() {
         var frames: [(faces: Int, matched: Bool, live: Bool)] = []
         for _ in 0..<10 { frames += repeated(57) + repeated(1, faces: 2) }
-        #expect(events(frames).count >= 9)
+        #expect(events(frames).count >= 8)
     }
 
-    @Test func shortBurstsOfAFaceEachCount() {
-        // 0.3 s bursts of an unrecognised face separated by covered frames.
+    @Test func atMostOneFailedLookPerTwoSeconds() {
+        // An unrecognised appearance of 1.2 s, then gone: counts once…
+        var frames = repeated(36) + repeated(30, faces: 0)
+        #expect(events(frames) == [.briefAppearance])
+        // …and appearances in quick succession are rate-limited.
+        frames = []
+        for _ in 0..<3 { frames += repeated(36) + repeated(22, faces: 0) }
+        let e = events(frames)
+        #expect(e.count <= 2)
+    }
+
+    @Test func detectorFlickerDoesNotSplitAnAppearance() {
+        // Real data: a badly placed owner, split by single no-face flickers.
+        // 0.6 s face, 1 frame missing, repeated: one appearance, which only
+        // counts after 1 s of usable non-matching time.
         var frames: [(faces: Int, matched: Bool, live: Bool)] = []
-        for _ in 0..<5 { frames += repeated(9) + repeated(5, faces: 0) }
-        #expect(events(frames).count == 5)
+        for _ in 0..<2 { frames += repeated(14) + repeated(1, faces: 0) }
+        #expect(events(frames).isEmpty)
+    }
+
+    @Test func unusableFramesNeverCount() {
+        // Owner at a bad angle / low quality for 10 s: no failed looks.
+        #expect(events(repeated(300), usable: { _ in false }).isEmpty)
+    }
+
+    @Test func shortBurstsOfAFaceAddUpInTheBucket() {
+        // 0.3 s bursts of an unrecognised face separated by 1 s covered: each
+        // burst is too short on its own, but the bucket keeps adding up.
+        var frames: [(faces: Int, matched: Bool, live: Bool)] = []
+        for _ in 0..<10 { frames += repeated(9) + repeated(30, faces: 0) }
+        #expect(events(frames).count >= 1)
+    }
+
+    @Test func askToFaceScreenWhenOnlyUnusableFaces() {
+        var m = ScanMonitor(start: 0)
+        for i in 0..<30 { m.observe(time: Double(i) / 30, faceCount: 1, matched: false, usable: false) }
+        #expect(m.shouldAskToFaceScreen(at: 1))
+        m.observe(time: 1.03, faceCount: 1, matched: true, usable: true)
+        #expect(!m.shouldAskToFaceScreen(at: 1.05))
     }
 
     @Test func veryShortFlickersDontCount() {

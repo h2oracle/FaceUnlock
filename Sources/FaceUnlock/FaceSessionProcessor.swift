@@ -82,7 +82,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
         if shouldReset { evaluator = UnlockEvaluator(policy: policy, liveness: liveness) }
         if lock.withLock({ finished }) { return }
 
-        let analysis = analyzer.analyze(pixelBuffer: pixelBuffer)
+        let analysis = analyzer.analyze(pixelBuffer: pixelBuffer, wantQuality: true)
         let score = analysis.embedding.map { MatchScore.score($0, against: template) }
         let observation = FrameObservation(
             time: time,
@@ -92,7 +92,8 @@ final class FaceSessionProcessor: @unchecked Sendable {
             yawDegrees: analysis.yawDegrees,
             pitchDegrees: analysis.pitchDegrees,
             landmarks: analysis.landmarks,
-            interocular: analysis.interocular
+            interocular: analysis.interocular,
+            usable: analysis.isUsable
         )
         let snapshot = evaluator.observe(observation)
         let eyeMean: Double? = {

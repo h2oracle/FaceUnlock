@@ -27,6 +27,9 @@ public struct FrameAnalysis: @unchecked Sendable {
 
     public init(faceCount: Int) { self.faceCount = faceCount }
 
+    /// Whether this frame shows a face well enough to judge it at all.
+    public var isUsable: Bool { FrameQualityGate.isUsable(self) }
+
     public func eyeSample(at time: TimeInterval) -> EyeSample? {
         guard let l = leftEyeOpenness, let r = rightEyeOpenness, let s = faceShape else { return nil }
         return EyeSample(time: time, left: l, right: r, faceShape: s, pitch: pitchDegrees)
@@ -187,5 +190,28 @@ public final class FaceAnalyzer: @unchecked Sendable {
             .clampedToExtent()
             .transformed(by: transform, highQualityDownsample: true)
             .cropped(to: Self.alignedRect)
+    }
+}
+
+/// Decides whether a single-face frame is good enough to count as either a
+/// match or a non-match. Bad angles, tiny or cut-off faces and low capture
+/// quality would otherwise turn the owner into "failed looks".
+public enum FrameQualityGate {
+    public static let minimumQuality: Float = 0.25
+    public static let maximumYaw: Double = 25
+    public static let maximumPitch: Double = 20
+    /// Face width as a fraction of the frame width.
+    public static let minimumFaceWidth: CGFloat = 0.10
+    /// The face box must stay this far inside the frame edges.
+    public static let edgeMargin: CGFloat = 0.01
+
+    public static func isUsable(_ f: FrameAnalysis) -> Bool {
+        guard f.faceCount == 1, f.embedding != nil, let box = f.boundingBox,
+              let yaw = f.yawDegrees, let pitch = f.pitchDegrees else { return false }
+        if let q = f.captureQuality, q < minimumQuality { return false }
+        guard abs(yaw) <= maximumYaw, abs(pitch) <= maximumPitch else { return false }
+        guard box.width >= minimumFaceWidth else { return false }
+        return box.minX >= edgeMargin && box.minY >= edgeMargin
+            && box.maxX <= 1 - edgeMargin && box.maxY <= 1 - edgeMargin
     }
 }

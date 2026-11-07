@@ -18,6 +18,7 @@ final class LockOverlay {
 
     func showScanning() {
         cancelPending()
+        model.hint = nil
         model.phase = .scanning
         model.visible = true
         present()
@@ -60,9 +61,16 @@ final class LockOverlay {
         after(1.5) { $0.hide() }
     }
 
-    /// Scanning has stopped after too many failed looks.
-    func showStopped() {
+    /// While scanning: a short instruction instead of "Looking for you…".
+    func setHint(_ hint: String?) {
+        guard model.hint != hint else { return }
+        model.hint = hint
+    }
+
+    /// Scanning has stopped for this lock session.
+    func showStopped(_ message: String) {
         cancelPending()
+        model.stoppedText = "Face Not Recognised\n" + message
         model.visible = true
         model.phase = .stopped
         present()
@@ -151,6 +159,8 @@ private final class HUDModel {
     var phase: Phase = .scanning
     var visible = false
     var failureText = "Face Not Recognised"
+    var stoppedText = "Face Not Recognised\nUse your password"
+    var hint: String?
 }
 
 /// Frosted HUD background (.hudWindow material, dark, rounded corners).
@@ -253,10 +263,10 @@ private struct HUDView: View {
 
     private var caption: String {
         switch model.phase {
-        case .scanning: return "Looking for you…"
+        case .scanning: return model.hint ?? "Looking for you…"
         case .success: return ""
         case .failure: return model.failureText
-        case .stopped: return "Face Not Recognised\nUse your password"
+        case .stopped: return model.stoppedText
         }
     }
 

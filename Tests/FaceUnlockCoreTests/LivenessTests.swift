@@ -184,11 +184,26 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         #expect(!s.shouldUnlock)
     }
 
-    @Test func failedEmbeddingResetsAllEvidence() {
+    @Test func unusableFramesAreAGapNotAReset() {
         var e = UnlockEvaluator(policy: policy)
         for i in 0..<12 { e.observe(frame(i, eye: eye(i))) }
-        let noEmbedding = FrameObservation(time: 1, faceCount: 1, score: nil, eyes: nil, yawDegrees: 0, pitchDegrees: 0)
-        #expect(!e.observe(noEmbedding).blinked)
+        #expect(e.snapshot.blinked)
+        // A short run of unreadable / badly angled frames keeps the evidence…
+        for k in 0..<5 {
+            let t = (12.0 + Double(k)) / 15
+            let s = e.observe(FrameObservation(time: t, faceCount: 1, score: nil, eyes: nil, yawDegrees: 40, pitchDegrees: 0))
+            #expect(s.blinked)
+            #expect(!s.frameMatched && !s.frameUsable)
+        }
+        // …but more than 0.7 s of them resets it.
+        var last: UnlockEvaluator.Snapshot?
+        for k in 5..<20 {
+            let t = (12.0 + Double(k)) / 15
+            last = e.observe(FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.9, bestSample: 0.9),
+                                              eyes: nil, yawDegrees: 0, pitchDegrees: 0, usable: false))
+        }
+        #expect(last?.blinked == false)
+        #expect(last?.consecutiveMatches == 0)
     }
 
     @Test func blinkDuringNonMatchingFramesDoesNotCount() {
@@ -252,12 +267,21 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         }
     }
 
-    @Test func faceLeavingFrameResetsEvidence() {
+    @Test func shortNoFaceFlickerKeepsEvidence() {
         var e = UnlockEvaluator(policy: policy)
         for i in 0..<15 { e.observe(frame(i, eye: eye(i))) }
         #expect(e.snapshot.blinked)
-        e.observe(frame(15, faces: 0))
+        for i in 15..<24 { e.observe(frame(i, faces: 0)) } // 9 frames ≈ 0.6 s
+        #expect(e.snapshot.blinked)
+        #expect(e.snapshot.consecutiveMatches > 0)
+    }
+
+    @Test func faceLeavingFrameForLongerResetsEvidence() {
+        var e = UnlockEvaluator(policy: policy)
+        for i in 0..<15 { e.observe(frame(i, eye: eye(i))) }
+        for i in 15..<30 { e.observe(frame(i, faces: 0)) } // 1 s
         #expect(!e.snapshot.blinked)
         #expect(e.snapshot.consecutiveMatches == 0)
+        #expect(e.snapshot.resetReason == nil || e.snapshot.resetReason == .noFace)
     }
 }
