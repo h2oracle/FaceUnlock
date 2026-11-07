@@ -65,11 +65,11 @@ final class EnrolmentRunner: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
     private let onUpdate: @Sendable (String, Double, String?) -> Void
-    private let onComplete: @Sendable ([[Float]]) -> Void
+    private let onComplete: @Sendable ([[Float]], PoseBaseline?) -> Void
 
     init(analyzer: FaceAnalyzer,
          onUpdate: @escaping @Sendable (String, Double, String?) -> Void,
-         onComplete: @escaping @Sendable ([[Float]]) -> Void) {
+         onComplete: @escaping @Sendable ([[Float]], PoseBaseline?) -> Void) {
         self.analyzer = analyzer
         self.onUpdate = onUpdate
         self.onComplete = onComplete
@@ -88,7 +88,7 @@ final class EnrolmentRunner: @unchecked Sendable {
                 done = true
                 return true
             }
-            if first { onComplete(collector.embeddings) }
+            if first { onComplete(collector.embeddings, collector.baselinePose) }
         }
     }
 }
@@ -102,6 +102,11 @@ final class TestModel {
     var passed = false
     var threshold: Float = MatchPolicy.defaultThreshold
     private var recentScores: [Float] = []
+    private var strongPoses: [(yaw: Double, pitch: Double)] = []
+
+    /// Median pose of strongly matching frames in this test (for templates
+    /// that predate the enrolled baseline).
+    var strongPoseMedian: PoseBaseline? { strongPoses.count >= 8 ? PoseBaseline.median(strongPoses) : nil }
 
     /// Median centroid score of recent frames with a single, matching face.
     var typicalScore: Float? {
@@ -155,7 +160,13 @@ struct TestView: View {
 extension TestModel {
     func apply(_ r: LiveReadout) {
         let s = r.snapshot
-        if s.faceCount == 1, s.frameMatched, let score = s.score { noteScore(score.centroid) }
+        if s.faceCount == 1, s.frameMatched, let score = s.score {
+            noteScore(score.centroid)
+            if score.centroid >= threshold + 0.05, let y = s.latestYaw, let p = s.latestPitch {
+                strongPoses.append((y, p))
+                if strongPoses.count > 90 { strongPoses.removeFirst(strongPoses.count - 90) }
+            }
+        }
         var lines: [String] = []
         lines.append("Faces in frame:     \(s.faceCount)\(s.faceCount > 1 ? "  (only one allowed)" : "")")
         if let score = s.score {
@@ -176,6 +187,11 @@ extension TestModel {
         if s.faceCount == 1 && !s.frameUsable { lines.append("Face not usable:    look straight at the screen") }
         lines.append("Liveness (\(s.livenessMode.title)): \(s.livenessSatisfied ? "✓" : "waiting")")
         lines.append("Attention:          \(s.attentionProblem ?? (s.frameMatched ? "facing screen, eyes open ✓" : "–"))  (\(s.attentiveRun)/5)")
+        let base = s.attentionBaseline.map { String(format: "%.1f° / %.1f°", $0.yaw, $0.pitch) } ?? "learning"
+        lines.append(String(format: "Pose (yaw/pitch):   %@ / %@  [%@]  baseline %@",
+                            s.latestYaw.map { String(format: "%.1f°", $0) } ?? "–",
+                            s.latestPitch.map { String(format: "%.1f°", $0) } ?? "–",
+                            s.poseFromLandmarks ? "landmarks" : "Vision", base))
         self.lines = lines
         if s.shouldUnlock { passed = true }
     }

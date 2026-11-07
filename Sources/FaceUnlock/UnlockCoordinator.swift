@@ -439,6 +439,7 @@ final class UnlockCoordinator {
         let processor = FaceSessionProcessor(
             analyzer: analyzer, template: template, policy: policy, liveness: liveness,
             ignoreFramesBefore: lockStartedAt + Self.gracePeriodAfterLock,
+            attentionBaseline: template.baselinePose ?? SetupStore.testBaselinePose,
             onReadout: { [weak self] readout in
                 let faces = readout.snapshot.faceCount
                 let matched = readout.snapshot.frameMatched

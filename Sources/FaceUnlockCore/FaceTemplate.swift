@@ -14,6 +14,11 @@ public struct FaceTemplate: Codable, Equatable, Sendable {
     /// `AVCaptureDevice.uniqueID` of the camera used at enrolment. Unlock
     /// only ever uses this camera.
     public var cameraID: String?
+    /// Median head pose (degrees) over the enrolment samples: how this owner
+    /// faces the screen relative to the camera (on a MacBook the camera sits
+    /// above the screen, so "looking at the screen" isn't pitch 0). Older
+    /// templates don't have it.
+    public var baselinePose: PoseBaseline?
 
     public init(modelID: String, samples: [[Float]], cameraID: String? = nil, createdAt: Date = Date()) throws {
         let normalized = samples.map(VectorMath.l2Normalized)
@@ -34,7 +39,9 @@ public struct FaceTemplate: Codable, Equatable, Sendable {
     public func removingOutliers(minimumSimilarity: Float, minimumKept: Int) throws -> FaceTemplate {
         let kept = samples.filter { VectorMath.cosine($0, centroid) >= minimumSimilarity }
         guard kept.count >= minimumKept else { throw FaceTemplateError.inconsistentSamples(kept: kept.count) }
-        return try FaceTemplate(modelID: modelID, samples: kept, cameraID: cameraID, createdAt: createdAt)
+        var t = try FaceTemplate(modelID: modelID, samples: kept, cameraID: cameraID, createdAt: createdAt)
+        t.baselinePose = baselinePose
+        return t
     }
 
     /// Mean cosine of samples to the centroid: a rough "how consistent was
@@ -117,4 +124,36 @@ public struct ConsecutiveMatchCounter: Equatable, Sendable {
     public mutating func reset() { run = 0 }
 
     public var isSatisfied: Bool { run >= required }
+}
+
+/// A reference head pose (degrees) that counts as "facing the screen".
+public struct PoseBaseline: Codable, Equatable, Sendable {
+    public var yaw: Double
+    public var pitch: Double
+
+    public init(yaw: Double, pitch: Double) {
+        self.yaw = yaw
+        self.pitch = pitch
+    }
+
+    /// Median of a set of poses (nil if empty).
+    public static func median(_ poses: [(yaw: Double, pitch: Double)]) -> PoseBaseline? {
+        guard !poses.isEmpty else { return nil }
+        func med(_ v: [Double]) -> Double {
+            let s = v.sorted()
+            return s.count % 2 == 1 ? s[s.count / 2] : (s[s.count / 2 - 1] + s[s.count / 2]) / 2
+        }
+        return PoseBaseline(yaw: med(poses.map(\.yaw)), pitch: med(poses.map(\.pitch)))
+    }
+
+    /// A baseline further than this from the camera axis isn't plausible
+    /// for someone looking at the screen, so it's clamped. Pitch can be large
+    /// because the camera sits above the screen; yaw only comes from posture.
+    public static let plausibleYaw: Double = 12
+    public static let plausiblePitch: Double = 25
+
+    public var clamped: PoseBaseline {
+        PoseBaseline(yaw: min(max(yaw, -Self.plausibleYaw), Self.plausibleYaw),
+                     pitch: min(max(pitch, -Self.plausiblePitch), Self.plausiblePitch))
+    }
 }

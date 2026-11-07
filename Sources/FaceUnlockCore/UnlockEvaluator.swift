@@ -17,6 +17,8 @@ public struct FrameObservation: Sendable {
     /// False when the face is too turned, too small, cut off, low quality or
     /// couldn't be embedded: such a frame is neither a match nor a non-match.
     public var usable: Bool
+    /// The pose was estimated from landmarks (Vision didn't report one).
+    public var poseEstimated = false
     /// Why it isn't usable (for diagnostics only).
     public var unusableReason: String?
 
@@ -53,8 +55,11 @@ public struct FrameObservation: Sendable {
 /// unlocks.
 public struct AttentionPolicy: Equatable, Sendable {
     public var requiredFrames = 5
-    public var maximumYaw: Double = 12
+    /// Allowed deviation (degrees) from the owner's baseline pose.
+    public var maximumYaw: Double = 15
     public var maximumPitch: Double = 15
+    /// How this owner faces the screen (pose relative to the camera).
+    public var baseline = PoseBaseline(yaw: 0, pitch: 0)
     /// Each eye must be at least this fraction of its calibrated open level…
     public var minimumOpenRatio: Double = 0.6
     /// …and at least this open in absolute terms (area / width²; open eyes
@@ -63,14 +68,18 @@ public struct AttentionPolicy: Equatable, Sendable {
     /// The score must clear the threshold by this much.
     public var scoreMargin: Float = 0.05
 
-    public init() {}
+    public init(baseline: PoseBaseline = PoseBaseline(yaw: 0, pitch: 0)) {
+        self.baseline = baseline.clamped
+    }
 
     /// nil if attentive, otherwise why not.
     public func problem(score: MatchScore, threshold: Float, yaw: Double?, pitch: Double?,
                         eyes: EyeSample?, eyeRatios: (left: Double, right: Double)?) -> String? {
         guard score.centroid >= threshold + scoreMargin else { return "weak match" }
         guard let yaw, let pitch else { return "pose unknown" }
-        guard abs(yaw) <= maximumYaw, abs(pitch) <= maximumPitch else { return "not facing the screen" }
+        guard abs(yaw - baseline.yaw) <= maximumYaw, abs(pitch - baseline.pitch) <= maximumPitch else {
+            return "not facing the screen"
+        }
         guard let eyes, let ratios = eyeRatios else { return "eyes not measured" }
         guard eyes.left >= minimumOpenness, eyes.right >= minimumOpenness,
               ratios.left >= minimumOpenRatio, ratios.right >= minimumOpenRatio else { return "eyes closed" }
@@ -128,10 +137,23 @@ public struct UnlockEvaluator: Sendable {
         public var attentiveRun: Int = 0
         /// Why the latest matched frame wasn't attentive (nil if it was).
         public var attentionProblem: String?
+        /// Absolute pose of the latest frame and the baseline in use.
+        public var latestYaw: Double?
+        public var latestPitch: Double?
+        public var poseFromLandmarks = false
+        public var attentionBaseline: PoseBaseline?
     }
 
     public let policy: MatchPolicy
-    public let attention = AttentionPolicy()
+    /// Fixed baseline (from enrolment or a saved test), or nil to learn one
+    /// from the strongest matches of this session.
+    private var attention: AttentionPolicy?
+    private var strongPoses: [(score: Float, yaw: Double, pitch: Double)] = []
+    /// Strong matches needed before a session baseline is trusted.
+    public static let sessionBaselineFrames = 8
+    private var latestYaw: Double?
+    private var latestPitch: Double?
+    private var latestPoseEstimated = false
     private var attentiveRun = 0
     private var lastAttentionProblem: String?
     public let livenessMode: LivenessMode
@@ -156,10 +178,12 @@ public struct UnlockEvaluator: Sendable {
 
     public init(policy: MatchPolicy,
                 liveness: LivenessMode = .blinkAndMovement,
+                attentionBaseline: PoseBaseline? = PoseBaseline(yaw: 0, pitch: 0),
                 blinkConfig: BlinkDetector.Config = .init(),
                 poseConfig: PoseVariationCheck.Config = .init(),
                 motionConfig: NaturalMovementCheck.Config = .init()) {
         self.policy = policy
+        self.attention = attentionBaseline.map { AttentionPolicy(baseline: $0) }
         self.livenessMode = liveness
         self.motion = NaturalMovementCheck(config: motionConfig)
         self.counter = ConsecutiveMatchCounter(required: policy.requiredConsecutive)
@@ -169,6 +193,20 @@ public struct UnlockEvaluator: Sendable {
 
     private var hasEvidence: Bool {
         counter.run > 0 || blink.state != .calibrating || pose.sampleCount > 0 || motion.duration > 0
+    }
+
+    /// Without an enrolled baseline: once enough strong matches have been
+    /// seen, use the median pose of the best-scoring half (the most frontal
+    /// frames score highest), clamped to a plausible range.
+    private mutating func learnSessionBaseline(score: MatchScore, yaw: Double?, pitch: Double?) {
+        guard attention == nil, let yaw, let pitch,
+              score.centroid >= policy.threshold + AttentionPolicy().scoreMargin else { return }
+        strongPoses.append((score.centroid, yaw, pitch))
+        guard strongPoses.count >= Self.sessionBaselineFrames else { return }
+        let best = strongPoses.sorted { $0.score > $1.score }.prefix(max(4, strongPoses.count / 2))
+        if let b = PoseBaseline.median(best.map { ($0.yaw, $0.pitch) }) {
+            attention = AttentionPolicy(baseline: b)
+        }
     }
 
     private mutating func resetEvidence(_ reason: ResetReason) {
@@ -192,6 +230,9 @@ public struct UnlockEvaluator: Sendable {
         lastResetReason = nil
         lastEyeRatio = nil
         lastAttentionProblem = nil
+        latestYaw = frame.yawDegrees
+        latestPitch = frame.pitchDegrees
+        latestPoseEstimated = frame.poseEstimated
 
         if frame.faceCount > 1 {
             sawMultipleFaces = true
@@ -220,9 +261,14 @@ public struct UnlockEvaluator: Sendable {
                 // Attention is judged against the open-eye level calibrated so
                 // far (before this frame updates it).
                 let ratios = frame.eyes.flatMap { blink.ratios(for: $0) }
-                lastAttentionProblem = attention.problem(score: score, threshold: policy.threshold,
-                                                         yaw: frame.yawDegrees, pitch: frame.pitchDegrees,
-                                                         eyes: frame.eyes, eyeRatios: ratios)
+                learnSessionBaseline(score: score, yaw: frame.yawDegrees, pitch: frame.pitchDegrees)
+                if let attention {
+                    lastAttentionProblem = attention.problem(score: score, threshold: policy.threshold,
+                                                             yaw: frame.yawDegrees, pitch: frame.pitchDegrees,
+                                                             eyes: frame.eyes, eyeRatios: ratios)
+                } else {
+                    lastAttentionProblem = "learning how you face the screen"
+                }
                 attentiveRun = lastAttentionProblem == nil ? attentiveRun + 1 : 0
                 let blinkedBefore = blink.hasBlinked
                 if let eyes = frame.eyes {
@@ -263,7 +309,7 @@ public struct UnlockEvaluator: Sendable {
             liveProgress = 1
         }
         let unlock = lastFaceCount == 1 && lastMatched && counter.isSatisfied && live
-            && attentiveRun >= attention.requiredFrames
+            && attention != nil && attentiveRun >= AttentionPolicy().requiredFrames
         let matchProgress = min(1, Double(counter.run) / Double(counter.required))
         return Snapshot(
             faceCount: lastFaceCount,
@@ -293,7 +339,11 @@ public struct UnlockEvaluator: Sendable {
             progress: unlock ? 1 : (matchProgress + liveProgress) / 2,
             livenessProgress: liveProgress,
             attentiveRun: attentiveRun,
-            attentionProblem: lastAttentionProblem
+            attentionProblem: lastAttentionProblem,
+            latestYaw: latestYaw,
+            latestPitch: latestPitch,
+            poseFromLandmarks: latestPoseEstimated,
+            attentionBaseline: attention?.baseline
         )
     }
 }

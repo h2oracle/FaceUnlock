@@ -59,9 +59,12 @@ live person, it types your login password into the lock screen for you.
 4. **Liveness**: evidence is only taken from frames that match you. Any frame
    that doesn't match resets it.
 5. **Attention**: like Face ID's "Require Attention", the last 5 matched
-   frames before unlocking must all show you facing the screen (yaw ≤ 12°,
-   pitch ≤ 15°), with both eyes open and a score at least 0.05 above the
-   threshold. Turning away or closing your eyes can never be what unlocks
+   frames before unlocking must all show you facing the screen, with both
+   eyes open and a score at least 0.05 above the threshold. "Facing the
+   screen" means within 15° of how you faced it while enrolling, because
+   the camera sits above the screen and looking at the screen isn't
+   straight at the camera. Faces enrolled before this was recorded learn
+   it from the best matches of the session, within a plausible range. Turning away or closing your eyes can never be what unlocks
    it, even if earlier frames already proved liveness. The indicator says
    "Look at the screen" when the match is good but attention is missing.
 6. **Unlock**: it re-checks that your session's lock screen is the window in

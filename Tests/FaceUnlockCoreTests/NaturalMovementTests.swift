@@ -245,6 +245,92 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         }
     }
 
+    // MARK: Attention relative to the owner's baseline (16:28 regression)
+
+    /// Owner looking at a MacBook screen: the camera is above it, so the face
+    /// is pitched about −20° relative to the camera, with normal sway.
+    private func lookingAtScreen(_ t: Double) -> SyntheticFace.Pose {
+        var p = normalHead(t)
+        p.pitch -= 20
+        return p
+    }
+
+    private func runAttention(baseline: PoseBaseline?, seconds: Double = 6, seed: UInt64 = 1,
+                              pose: (Double) -> SyntheticFace.Pose) -> Double? {
+        var face = SyntheticFace(flat: false, seed: seed)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.70), liveness: .naturalMovement,
+                                attentionBaseline: baseline)
+        for i in 0..<Int(seconds * fps) {
+            let t = Double(i) / fps
+            if e.observe(face.frame(time: t, pose: pose(t), score: 0.86)).shouldUnlock { return t }
+        }
+        return nil
+    }
+
+    @Test func ownerWithCameraAboveScreenUnlocksWithEnrolledBaseline() throws {
+        for seed in 1...5 {
+            let t = try #require(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seed: UInt64(seed),
+                                              pose: lookingAtScreen), "seed \(seed)")
+            #expect(t <= 1.5, "seed \(seed): \(t)s")
+        }
+    }
+
+    @Test func absoluteZeroBaselineWasTheBug() {
+        // What 111cadd did: attention measured from pitch 0 never passes.
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: 0), pose: lookingAtScreen) == nil)
+    }
+
+    @Test func oldTemplateWithoutBaselineLearnsItInSession() throws {
+        for seed in 1...3 {
+            let t = try #require(runAttention(baseline: nil, seed: UInt64(seed), pose: lookingAtScreen), "seed \(seed)")
+            #expect(t <= 2.0, "seed \(seed): \(t)s")
+        }
+    }
+
+    @Test func turnedMoreThanFifteenDegreesFromBaselineNeverUnlocks() {
+        // Baseline −20° pitch; the owner turns 30° sideways (strong score).
+        let turned: (Double) -> SyntheticFace.Pose = { t in
+            var p = self.lookingAtScreen(t)
+            p.yaw += 30
+            return p
+        }
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: turned) == nil)
+        // Looking far down (−20° more than the baseline) doesn't count either.
+        let down: (Double) -> SyntheticFace.Pose = { t in
+            var p = self.lookingAtScreen(t)
+            p.pitch -= 20
+            return p
+        }
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: down) == nil)
+    }
+
+    @Test func sessionLearnedBaselineCannotAdoptATurnedAwayPose() {
+        // No enrolled baseline and the owner only ever turned 35° away with a
+        // strong score: the learned baseline is clamped (yaw ±12°), so 35° is
+        // still "not facing the screen".
+        let turned: (Double) -> SyntheticFace.Pose = { t in
+            SyntheticFace.Pose(yaw: 35 + 4 * sin(2 * .pi * 0.5 * t), pitch: -10 + 2 * sin(t))
+        }
+        #expect(runAttention(baseline: nil, seconds: 10, pose: turned) == nil)
+    }
+
+    @Test func enrolmentStoresTheStraightPoseAsBaseline() {
+        var c = EnrolmentCollector()
+        var t = 0.0
+        while !c.isComplete && t < 60 {
+            var f = FrameAnalysis(faceCount: 1)
+            f.captureQuality = 0.8
+            f.embedding = [1, 0]
+            // Straight step at pitch −18°, then turned steps.
+            let step = c.stepIndex
+            f.yawDegrees = [0, -15, 15, 0][min(step, 3)] + 1
+            f.pitchDegrees = [-18, -18, -18, -5][min(step, 3)]
+            c.offer(f, at: t)
+            t += 0.25
+        }
+        #expect(c.baselinePose == PoseBaseline(yaw: 1, pitch: -18))
+    }
+
     @Test func closedEyesNeverUnlock() {
         for seed in 1...3 {
             var face = SyntheticFace(flat: false, seed: UInt64(seed))

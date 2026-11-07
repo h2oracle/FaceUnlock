@@ -24,6 +24,11 @@ public struct EnrolmentCollector: Sendable {
     public var stepSettleTime: TimeInterval = 1.2
 
     public private(set) var embeddings: [[Float]] = []
+    /// Head pose of each accepted sample (when known).
+    public private(set) var poses: [(yaw: Double, pitch: Double)] = []
+    /// Median pose of the "look straight" step: how this owner faces the screen.
+    public var baselinePose: PoseBaseline? { PoseBaseline.median(straightPoses) }
+    private var straightPoses: [(yaw: Double, pitch: Double)] = []
     public private(set) var stepIndex = 0
     private var acceptedInStep = 0
     private var lastAccepted: TimeInterval = -.infinity
@@ -57,6 +62,10 @@ public struct EnrolmentCollector: Sendable {
         lastRejection = nil
         lastAccepted = time
         embeddings.append(embedding)
+        if let y = frame.yawDegrees, let p = frame.pitchDegrees {
+            poses.append((y, p))
+            if stepIndex == 0 { straightPoses.append((y, p)) }
+        }
         acceptedInStep += 1
         if acceptedInStep >= Self.steps[stepIndex].samples {
             stepIndex += 1

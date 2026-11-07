@@ -971,8 +971,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 model.progress = progress
                 model.detail = rejection ?? ""
             }
-        }, onComplete: { [weak self] embeddings in
-            Task { @MainActor in self?.finishEnrolment(embeddings, cameraID: cameraID, model: model) }
+        }, onComplete: { [weak self] embeddings, baseline in
+            Task { @MainActor in self?.finishEnrolment(embeddings, baseline: baseline, cameraID: cameraID, model: model) }
         })
         enrolmentRunner = runner
         setupModel.enrolment = model
@@ -1003,13 +1003,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         camera.stop()
     }
 
-    private func finishEnrolment(_ embeddings: [[Float]], cameraID: String, model: EnrolmentModel) {
+    private func finishEnrolment(_ embeddings: [[Float]], baseline: PoseBaseline?, cameraID: String, model: EnrolmentModel) {
         enrolmentRunner = nil
         camera.stop()
         model.finished = true
         model.progress = 1
         do {
-            let raw = try FaceTemplate(modelID: FaceEmbedder.modelID, samples: embeddings, cameraID: cameraID)
+            var raw = try FaceTemplate(modelID: FaceEmbedder.modelID, samples: embeddings, cameraID: cameraID)
+            raw.baselinePose = baseline?.clamped
             let cleaned = try raw.removingOutliers(minimumSimilarity: 0.5, minimumKept: 12)
             if let integrityReadError { throw IntegrityError.unreadable(integrityReadError) }
             let keepEnabled = isEffectivelyEnabled
@@ -1053,9 +1054,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.threshold = policy.threshold
         let digest = templateDigest
         let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy,
-                                             liveness: verifiedLiveness, onReadout: { [weak self] readout in
+                                             liveness: verifiedLiveness,
+                                             attentionBaseline: template.baselinePose ?? SetupStore.testBaselinePose,
+                                             onReadout: { [weak self] readout in
             Task { @MainActor in
                 model.apply(readout)
+                if readout.snapshot.shouldUnlock, template.baselinePose == nil, let b = model.strongPoseMedian {
+                    SetupStore.testBaselinePose = b.clamped
+                }
                 if let typical = model.typicalScore { self?.setupModel.typicalScore = typical }
                 if readout.snapshot.shouldUnlock, let digest, SetupStore.testPassedForDigest != digest {
                     SetupStore.testPassedForDigest = digest

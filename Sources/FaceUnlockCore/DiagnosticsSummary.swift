@@ -75,6 +75,13 @@ public struct DiagnosticsSummarizer: Sendable {
         line += String(format: " motion=%.1fs rot=%.1f° parallax=%.2f%% snr=%.1f usable=%@", s.motionSeconds, s.motionRotation,
                        s.motionParallax * 100, s.motionSignalToNoise, s.frameUsable ? "y" : "n")
         line += " liveness(\(s.livenessMode.rawValue))=\(s.livenessSatisfied ? "ok" : "pending")"
+        line += " attention=\(s.frameMatched ? (s.attentionProblem ?? "ok") : "-") run=\(s.attentiveRun)/5"
+        line += " yaw=\(d(s.latestYaw, "%.1f")) pitch=\(d(s.latestPitch, "%.1f")) src=\(s.poseFromLandmarks ? "landmarks" : "vision")"
+        if let b = s.attentionBaseline {
+            line += String(format: " base=%.1f/%.1f", b.yaw, b.pitch)
+        } else {
+            line += " base=learning"
+        }
         if !resets.isEmpty {
             let parts = UnlockEvaluator.ResetReason.allCases.compactMap { r in resets[r].map { "\(r.rawValue)×\($0)" } }
             line += " resets: " + parts.joined(separator: ", ")

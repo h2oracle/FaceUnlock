@@ -39,9 +39,11 @@ final class FaceSessionProcessor: @unchecked Sendable {
 
     /// Frames with an earlier timestamp (system uptime) are dropped unseen.
     private let ignoreFramesBefore: TimeInterval
+    private let attentionBaseline: PoseBaseline?
 
     init(analyzer: FaceAnalyzer, template: FaceTemplate, policy: MatchPolicy, liveness: LivenessMode,
          ignoreFramesBefore: TimeInterval = 0,
+         attentionBaseline: PoseBaseline?,
          onReadout: (@Sendable (LiveReadout) -> Void)? = nil,
          onDiagnostics: (@Sendable (String) -> Void)? = nil,
          stopsOnPass: Bool = true,
@@ -51,11 +53,12 @@ final class FaceSessionProcessor: @unchecked Sendable {
         self.policy = policy
         self.liveness = liveness
         self.ignoreFramesBefore = ignoreFramesBefore
+        self.attentionBaseline = attentionBaseline
         self.onDiagnostics = onDiagnostics
         self.onReadout = onReadout
         self.onPass = onPass
         self.stopsOnPass = stopsOnPass
-        self.evaluator = UnlockEvaluator(policy: policy, liveness: liveness)
+        self.evaluator = UnlockEvaluator(policy: policy, liveness: liveness, attentionBaseline: attentionBaseline)
     }
 
     /// Emits the last partial diagnostics window (call when the attempt ends).
@@ -89,14 +92,14 @@ final class FaceSessionProcessor: @unchecked Sendable {
             resetRequested = false
             return r
         }
-        if shouldReset { evaluator = UnlockEvaluator(policy: policy, liveness: liveness) }
+        if shouldReset { evaluator = UnlockEvaluator(policy: policy, liveness: liveness, attentionBaseline: attentionBaseline) }
         if lock.withLock({ finished }) { return }
 
         // No capture-quality request here: it cost ~25 % of the frame rate,
         // and size, angle and landmarks are enough to judge non-matches.
         let analysis = analyzer.analyze(pixelBuffer: pixelBuffer)
         let score = analysis.embedding.map { MatchScore.score($0, against: template) }
-        let observation = FrameObservation(
+        var observation = FrameObservation(
             time: time,
             faceCount: analysis.faceCount,
             score: analysis.faceCount == 1 ? score : nil,
@@ -108,6 +111,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
             usable: analysis.isUsable,
             unusableReason: FrameQualityGate.problem(analysis)
         )
+        observation.poseEstimated = analysis.poseEstimated
         let snapshot = evaluator.observe(observation)
         let eyeMean: Double? = {
             guard let l = analysis.leftEyeOpenness, let r = analysis.rightEyeOpenness else { return nil }
