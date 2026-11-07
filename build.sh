@@ -2,10 +2,15 @@
 # Builds build/FaceUnlock.app (release) and code-signs it.
 # Usage: ./build.sh
 #
-# Signing identity: $FACEUNLOCK_SIGN_ID if set (SHA-1 hash or name, "-" for
-# ad-hoc), otherwise the default Apple Development identity below if it is in
-# the keychain, otherwise ad-hoc. A stable identity keeps the Keychain item,
-# Camera and Accessibility grants valid across rebuilds; ad-hoc does not.
+# Signing identity, in order:
+#   1. $FACEUNLOCK_SIGN_ID if set (SHA-1 hash or certificate name; "-" = ad-hoc)
+#   2. the first valid "Developer ID Application" identity in your keychain
+#   3. the first valid "Apple Development" identity
+#   4. ad-hoc
+# A stable identity keeps the Keychain item and the Camera/Accessibility
+# grants valid across rebuilds; ad-hoc signing does not.
+# Set FACEUNLOCK_TIMESTAMP=1 to request a secure timestamp (needed for
+# notarisation; contacts Apple's timestamp server).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +18,6 @@ APP_NAME="FaceUnlock"
 BUILD_DIR="${ROOT:?}/build"
 APP="${BUILD_DIR:?}/${APP_NAME}.app"
 MODEL="${ROOT}/Models/SFace.mlpackage"
-DEFAULT_SIGN_ID="-"
 
 # Only ever delete inside this project's build/ folder.
 case "${APP}" in
@@ -39,18 +43,30 @@ xcrun coremlcompiler compile "${MODEL}" "${APP}/Contents/Resources/" >/dev/null
 [[ -d "${APP}/Contents/Resources/SFace.mlmodelc" ]] || { echo "model compile failed" >&2; exit 1; }
 
 SIGN_ID="${FACEUNLOCK_SIGN_ID:-}"
+SIGN_NAME=""
 if [[ -z "${SIGN_ID}" ]]; then
-  IDENTITIES="$(security find-identity -v -p codesigning)"
-  if [[ "${IDENTITIES}" == *"${DEFAULT_SIGN_ID}"* ]]; then
-    SIGN_ID="${DEFAULT_SIGN_ID}"
-  else
-    SIGN_ID="-"
-    echo "warning: default signing identity not found; signing ad-hoc" >&2
-  fi
+  IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  for KIND in "Developer ID Application" "Apple Development"; do
+    LINE="$(printf '%s\n' "${IDENTITIES}" | grep -m1 "\"${KIND}: " || true)"
+    if [[ -n "${LINE}" ]]; then
+      SIGN_ID="$(printf '%s\n' "${LINE}" | awk '{print $2}')"
+      SIGN_NAME="$(printf '%s\n' "${LINE}" | sed -E 's/^[^"]*"(.*)"$/\1/')"
+      break
+    fi
+  done
+fi
+if [[ -z "${SIGN_ID}" || "${SIGN_ID}" == "-" ]]; then
+  SIGN_ID="-"
+  SIGN_NAME="ad-hoc"
 fi
 
-echo "==> signing with ${SIGN_ID}"
-codesign --force --deep --options runtime --timestamp=none \
+TIMESTAMP_FLAG="--timestamp=none"
+if [[ "${FACEUNLOCK_TIMESTAMP:-0}" == "1" && "${SIGN_ID}" != "-" ]]; then
+  TIMESTAMP_FLAG="--timestamp"
+fi
+
+echo "==> signing with: ${SIGN_NAME:-${SIGN_ID}}"
+codesign --force --deep --options runtime "${TIMESTAMP_FLAG}" \
   --entitlements "${ROOT}/Resources/FaceUnlock.entitlements" \
   -s "${SIGN_ID}" "${APP}"
 codesign --verify --deep --strict "${APP}"

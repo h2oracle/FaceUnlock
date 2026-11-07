@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          echo "Using ${XCODE}"
+          sudo xcode-select -s "${XCODE}/Contents/Developer"
+          swift --version
+
+      - name: swift build
+        run: swift build
+
+      # Unit tests need no camera, Keychain or permissions; the model parity
+      # test compiles Models/SFace.mlpackage and runs it on the CPU.
+      - name: swift test
+        run: swift test
+
+      - name: Build app bundle (ad-hoc signed)
+        env:
+          FACEUNLOCK_SIGN_ID: "-"
+        run: |
+          bash -n build.sh release.sh
+          ./build.sh

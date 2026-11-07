@@ -1,7 +1,16 @@
+# Build output
 .build/
 build/
+dist/
 *.mlmodelc
-.DS_Store
+
+# Editor / OS
+.vscode/
 .swiftpm/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+
+# Python (tools/convert_sface.py)
 __pycache__/
 .venv/

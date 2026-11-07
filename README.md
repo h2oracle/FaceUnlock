@@ -1,211 +1,268 @@
 # FaceUnlock
 
-A macOS menu-bar app that unlocks your Mac's **lock screen** when the built-in
-webcam recognises your face. All processing is on-device; the app makes no
-network connections.
+[![CI](https://github.com/h2oracle/FaceUnlock/actions/workflows/ci.yml/badge.svg)](https://github.com/h2oracle/FaceUnlock/actions/workflows/ci.yml)
 
-> **This is a convenience feature, not a security feature.** Read
-> [Security limitations](#security-limitations) before enabling it.
+FaceUnlock is a small macOS menu-bar app that unlocks your Mac's **lock
+screen** when it recognises your face through the built-in camera, a bit
+like Face ID on an iPhone. Recognition runs entirely on your Mac using Apple's
+Vision and Core ML frameworks. When it is sure it's you and that you're a
+live person, it types your login password into the lock screen for you.
 
-Requires macOS 15+, Xcode / Swift 6 toolchain to build.
+> [!WARNING]
+> **Read this before installing. FaceUnlock is a convenience feature, not a
+> security upgrade.**
+>
+> - A webcam can't do what Face ID's depth sensor does. A **video** of you, a
+>   good mask, or a convincingly moved photo may unlock your Mac.
+> - It works by **typing your login password**, which it keeps in your login
+>   Keychain.
+> - It only works for the screen lock of a session you're already logged into.
+>   It does **not** work at boot, at the FileVault unlock screen or at the
+>   login window.
+> - It uses **private macOS APIs**: a SkyLight window-server space so its
+>   indicator can appear on the lock screen, and `SACLockScreenImmediate` for
+>   the setup lock test. A macOS update could break them.
+> - In the default mode the **camera is on whenever the lock screen is
+>   showing** and the display is awake.
+> - Someone using your unlocked session can't re-enrol a different face,
+>   change the settings or turn it on without your login password. They
+>   *can* turn face unlock off.
 
-## Install
+## Features
 
-```bash
-./build.sh                       # swift build -c release, assembles + signs build/FaceUnlock.app
-cp -R build/FaceUnlock.app ~/Applications/   # or /Applications
-open ~/Applications/FaceUnlock.app
-```
-
-A face icon appears in the menu bar. Then grant permissions (the menu shows
-anything missing at the top):
-
-1. **Camera** – menu → *Camera: not yet allowed – Allow…* (or it is asked the
-   first time you enrol).
-2. **Accessibility** – menu → *Accessibility: needed – Grant…*, then enable
-   FaceUnlock in System Settings → Privacy & Security → Accessibility. This is
-   needed to type your password on the lock screen.
-
-`build.sh` signs with an Apple Development identity (override with
-`FACEUNLOCK_SIGN_ID=<sha1 or name>`, or `-` for ad-hoc). With a stable
-identity, the Camera/Accessibility grants and Keychain access survive
-rebuilds. If it falls back to **ad-hoc** signing (no identity found), macOS
-ties those to the exact build: after each rebuild re-grant Camera and
-Accessibility and use *Change password…* again. The menu warns if the stored
-password can't be read without a prompt (nobody can answer a prompt at the
-lock screen).
-
-## Set up
-
-FaceUnlock opens a **Setup** window on first launch (and whenever a required
-step is missing). It also opens when you launch the app again from Spotlight or
-Finder, and from **Setup…** at the top of the menu-bar menu. That's useful
-because the menu-bar icon can be hidden behind the notch. It walks
-through seven steps, ticking each one off live: Camera access → Accessibility
-→ Login password → Enrol face → Test recognition → Turn on (plus Launch at
-login, on by default) → Lock-screen test. Each step unlocks once the previous
-ones are done.
-
-The **lock-screen test** locks the screen after a 3-second countdown. Then
-just look at the camera (with *Start scanning: only after input*, move the
-mouse or press Shift first).
-The outcome of every attempt at the lock screen is stored as a small record:
-time, result, and a reason such as no face, best score, no blink, or front
-window owner. It never contains the password. When you come back, the step
-explains what happened and what to do.
-
-Within one Setup session, a password you just verified (step 3 or any
-password prompt) is reused for 5 minutes, so you aren't asked again. Only a
-timestamp is kept.
-
-The individual steps, also available from the menu:
-
-
-1. **Set password…** – enter your Mac login password. It is verified with the
-   OpenDirectory framework (in-process) and then stored only in your login
-   Keychain (generic password, service `uk.co.sid.faceunlock`).
-2. **Enrol face…** – confirm with your login password, then follow the prompts (look straight, slightly left, right,
-   up). About 18 good-quality frames are captured; only numeric embeddings are
-   saved to `~/Library/Application Support/FaceUnlock/face-template.json`
-   (folder 0700, file 0600). A SHA-256 of that file and the match threshold are
-   stored in a second Keychain item; if either is changed behind FaceUnlock's
-   back, the menu shows *Template changed – re-enrol* and nothing unlocks.
-   Only the Mac's built-in camera is used (not iPhone/Continuity, external or
-   virtual cameras), and unlock uses the same camera as enrolment.
-3. **Test recognition…** – live preview with match score, consecutive matches,
-   eye openness, blink state, head-pose range and natural-movement numbers.
-   Look at the camera (blink too, in *Blink + movement* mode); it should say
-   *PASS – would unlock*. Hold up a photo of yourself to see it fail. Nothing
-   is typed from this window.
-4. **Enabled** – tick it (asks for your login password). Optionally tick
-   **Launch at login**.
-
-Enrolling, changing the strictness, enabling and deleting data all require
-your login password. Turning face unlock *off* never does.
-
-### Match strictness
-
-*Match strictness* (asks for your login password) sets the cosine-similarity
-threshold: Relaxed 0.55, Standard 0.70 (default for new set-ups), Strict 0.80.
-Set-ups made before 0.70 became the default keep their threshold. If your
-test scores are high, the Test step suggests the stricter value and applies
-it with one password confirmation. Both the averaged template and the best single enrolment sample
-must reach it on 3 consecutive frames. Use *Test recognition…* to see your
-typical score; pick the strictest setting that still recognises you reliably.
-Changing the value with `defaults write` is treated as tampering: unlock
-stops until you choose a strictness in the menu again.
+- Unlocks the lock screen by recognising your face, with no key press needed in
+  the default mode.
+- Liveness checks: *Natural movement* (no blink needed) or *Blink + movement*.
+- iPhone-style Face ID indicator on the lock screen: scanning, a tick on a
+  match, and a shake on "Face Not Recognised".
+- Guided Setup window that ticks off each step and ends with a real
+  lock-screen test.
+- Strict matching. Several consecutive matching frames and exactly one face in
+  view are required.
+- Failed attempts are limited, and it stops immediately if a typed password
+  doesn't work.
+- Everything stays on-device, with no network access at all.
+- A diagnostics log explains why an attempt did or didn't unlock.
+- Launch at login.
 
 ## How it works
 
-- **Trigger** (menu → *Start scanning*, or the Setup "Turn on" step; not
-  password-gated):
-  - **Automatically when the lock screen shows** (default): while the session
-    is locked and the display is awake, the camera scans continuously,
-    starting 1 s after locking and again on every display wake or lid
-    opening. No input is needed. **The camera's green light is on whenever
-    the lock screen is visible**; macOS turns the display off at the lock
-    screen after a short time, which stops the camera.
-  - **Only after I move the mouse or press a key**: input starts a scan of up
-    to 10 s.
-  The lock state comes from `CGSessionCopyCurrentDictionary`. Input is
-  detected by polling the system idle time 10× a second while locked. If no
-  face is seen for 60 s, the camera pauses until the next input or wake. The
-  Face ID-style HUD fades out after 3 s without a face and fades back in when
-  one appears.
-- **Recognition**: Vision face detection + 76-point landmarks → 5-point
-  alignment to a 112×112 crop → **SFace** (MobileFaceNet) Core ML model →
-  128-d embedding → cosine similarity against the enrolled template.
-- **Liveness** (menu → *Liveness*, or the Test step; changing it asks for your
-  login password and is recorded in the Keychain integrity item):
-  - **Natural movement** (default for new set-ups): no blink needed. Over at
-    least 0.5 s of matching frames (measured as time, not frames) the head
-    must move slightly in 3D (≥ 0.8° yaw or pitch) and the eye region must
-    show small frame-to-frame changes (≥ 2.5 %). A person sitting normally
-    should pass in well under a second. Set-ups from before this setting
-    existed are offered a one-click switch in the Setup window. These
-    thresholds are estimates. Check them against a photo with *Test
-    recognition*.
-  - **Blink + movement**: a natural blink (open → both closed briefly → open,
-    with checks that reject a tilted photo) plus slight head movement
-    (≥ 2.5°), and 3 matching frames after the blink.
-  - **Off**: face match only. A photo of you can unlock.
-  Liveness evidence only counts from frames that match you. Any frame without
-  a matching single face (no face, two faces, someone else, or a face that
-  couldn't be read) resets all evidence.
-- **Lock-screen indicator**: an iPhone-style frosted HUD above the password
-  field shows a pulsing Face ID glyph ("Looking for you…"). On a match a
-  circle and checkmark draw in, while typing starts at the same time. A
-  failed look shakes the glyph with "Face Not Recognised". To appear above
-  the lock screen it uses a private macOS window-server feature. If that
-  doesn't work, the HUD simply isn't shown and unlocking is unaffected. The camera light is always the fallback indicator.
-- **Diagnostics**: every lock session and attempt is logged to
-  `~/Library/Application Support/FaceUnlock/diagnostics.log` (0600, rotated at
-  ~1 MB). The log has the attempt start (trigger, time since lock, idle time),
-  a summary every 0.5 s (frames, faces, best/latest score vs threshold,
-  match run, eye openness, blink state, pose and movement numbers, and
-  evidence resets with their reasons), and the reason each attempt ended. It
-  also records why an attempt didn't start. It never contains the password,
-  embeddings or images. Key lines also go to the unified log
-  (`log show --predicate 'subsystem == "uk.co.sid.faceunlock"'`).
-- **Unlock**: on success it wakes the display, clears the password field and
-  types the password one Unicode character at a time (so non-US layouts
-  work), then Return. Before the clear step, before each character and
-  before Return it re-checks that this session's screen is still locked and
-  that the front full-screen window belongs to `loginwindow`; it stops at once
-  if not, or if the Mac goes to sleep. The password is held in a buffer
-  that is zeroed afterwards. Copies inside macOS (Keychain, event system,
-  the password field) can't be wiped.
-- **Lockout**: a *failed look* is one face in view that keeps not matching
-  for about 2 s. Frames with no face never count. After **3 failed looks**
-  the camera stops and the HUD says "Face Not Recognised – use your
-  password"; it resumes only after the display sleeps and wakes again, and
-  moving the mouse doesn't resume it. After **5 failed looks** in one lock
-  session, or if a typed password doesn't unlock the screen within 6 s,
-  FaceUnlock stops until you unlock manually.
-- **Speed**: the camera runs at up to 30 fps and the session is configured in
-  advance. The models are loaded and warmed up at launch, and the password is
-  typed at about 8 ms per character. The diagnostics log has a timing
-  breakdown for each unlock (scan start → first frame → match → typing done
-  → unlocked).
+1. **Detect**: Vision finds faces and 76 facial landmarks in each camera frame
+   (up to 30 fps). Exactly one face must be in view.
+2. **Align and embed**: the face is warped onto a standard 112×112 5-point
+   template and turned into a 128-number embedding by the **SFace**
+   (MobileFaceNet) model, run with Core ML.
+3. **Match**: the embedding is compared, using cosine similarity, with the
+   averaged embedding from your enrolment and with the closest enrolment
+   sample. Both must reach the threshold on 3 consecutive frames.
+4. **Liveness**: evidence is only taken from frames that match you. Any frame
+   that doesn't match resets it.
+5. **Unlock**: it re-checks that your session's lock screen is the window in
+   front, then types the password one character at a time and presses Return.
 
-## Security limitations
+Only numbers describing your face (embeddings) are saved. Images are never
+written to disk.
 
-- **A webcam is not Face ID.** There is no depth or IR sensor. *Blink +
-  movement* stops a printed photo or a still image on a phone. *Natural
-  movement* is designed to stop a still photo, but it is weaker against a
-  photo that is moved around. In either mode a **video** of you (or a good
-  mask) can pass. Someone with such a video and
-  physical access to your Mac can unlock it.
-- **Your login password is stored in your Keychain** and typed by the app.
-  Anything that can read that Keychain item, or that runs as you with
-  Accessibility permission, could misuse it.
-- **It does not work at boot, after a restart, with FileVault pre-boot
-  unlock, at the login window or for another user's session.** Only the
-  screen lock of a session you have already logged into (and unlocked at
-  least once since FaceUnlock started).
-- Face templates are biometric data; they are stored only as numbers, in your
-  home folder with owner-only permissions.
-- Matching quality depends on lighting. Recognition thresholds were chosen
-  conservatively but have not been calibrated against a large set of faces;
-  check your own scores with *Test recognition…*.
+## Requirements
 
-## Disable / remove
+- macOS 15 Sequoia or later
+- Apple Silicon Mac
+- Built-in camera (FaceUnlock deliberately ignores iPhone/Continuity, external
+  and virtual cameras)
 
-- Untick **Enabled** in the menu (takes effect immediately), or quit the app.
-- **Delete face data and password…** (asks for your login password) removes
-  the template file and both Keychain items.
-- Untick **Launch at login**, then delete the app. Optionally remove
-  `~/Library/Application Support/FaceUnlock` and the app's entries in System
-  Settings → Privacy & Security → Camera / Accessibility.
+## Install
 
-## Development
+### Download a release
+
+1. Download `FaceUnlock-<version>.zip` from the
+   [Releases](https://github.com/h2oracle/FaceUnlock/releases) page and
+   check it against the `.sha256` file if you like
+   (`shasum -a 256 FaceUnlock-<version>.zip`).
+2. Unzip it and move **FaceUnlock.app** to `/Applications` or
+   `~/Applications`.
+3. If the app isn't notarised, macOS will refuse to open it the first time.
+   Either **right-click (Control-click) the app › Open › Open**, or try to
+   open it, then go to **System Settings › Privacy & Security** and click
+   **Open Anyway**.
+
+### Build from source
 
 ```bash
-swift build        # debug build
-swift test         # unit tests (matching, liveness modes, lockout, setup gating, diagnostics, model parity)
-./build.sh         # release .app in build/
+git clone https://github.com/h2oracle/FaceUnlock.git
+cd FaceUnlock
+./build.sh                      # creates build/FaceUnlock.app
+cp -R build/FaceUnlock.app ~/Applications/
+open ~/Applications/FaceUnlock.app
 ```
 
-`Models/SFace.mlpackage` was produced by `tools/convert_sface.py` from OpenCV
-Zoo's `face_recognition_sface_2021dec.onnx` (Apache-2.0). See `NOTICE` for
-licences and attribution.
+`build.sh` signs the app with `$FACEUNLOCK_SIGN_ID` if set. Otherwise it uses
+your first *Developer ID Application* or *Apple Development* identity, and
+falls back to ad-hoc signing. With a stable identity, macOS keeps the Camera
+and Accessibility permissions and the Keychain access when you rebuild. With
+ad-hoc signing you have to grant them again after every build. The bundle
+identifier (`uk.co.sid.faceunlock`) is just the project's default. Changing it
+gives you a separate app with its own settings and permissions.
+
+## Setup
+
+FaceUnlock opens its **Setup** window on first launch. You can open it any
+time from **Setup…** in the menu-bar menu, or by opening the app again from
+Spotlight or Finder. Each step unlocks once the earlier ones are done:
+
+1. **Camera access**: allow the camera.
+2. **Accessibility**: needed to type your password. *Open Settings…* takes you
+   to the right pane, and the tick appears once you've switched FaceUnlock on.
+3. **Login password**: entered once and checked with macOS's directory
+   service. It is stored only in your login Keychain.
+4. **Enrol your face**: confirm with your password, then follow the on-screen
+   prompts (look straight, slightly left, right and up).
+5. **Test recognition**: a live preview with your match score, eye openness,
+   head movement and liveness status. The step is ticked after a real *PASS*.
+6. **Turn on**: enable face unlock (asks for your password), with *Launch at
+   login* and *Start scanning* options.
+7. **Lock-screen test**: locks the screen after a 3-second countdown so you
+   can try it for real. When you come back, the step tells you what happened
+   and what to do if it didn't work.
+
+Within one Setup session, a password you've just confirmed is reused for 5
+minutes so you aren't asked repeatedly. Only the time of confirmation is kept.
+
+## Settings
+
+All settings are in the menu-bar menu. The first two are also in the Setup
+window.
+
+- **Liveness** (asks for your password):
+  - *Natural movement* (default): no blink needed. Over at least 0.5 s of
+    matching frames your head must move slightly and the eye region must
+    show small natural changes. It is designed to reject a still photo; a
+    moving photo or a video may pass.
+  - *Blink + movement*: a natural blink plus slight head movement. This is the
+    strongest webcam check, but a video of you can still pass.
+  - *Off*: face match only. A photo of you can unlock. Not recommended.
+- **Match strictness** (asks for your password): Relaxed 0.55, Standard 0.70
+  (default) or Strict 0.80. *Test recognition* shows your typical score and
+  suggests a stricter value if you have plenty of headroom.
+- **Start scanning** (no password needed, because it doesn't affect matching):
+  - *Automatically when the lock screen shows* (default): the camera scans
+    while the lock screen is visible and the display is on, so you don't need
+    to press anything. macOS turns the display off at the lock screen after a
+    short time, and that stops the camera. If no face is seen for 60 s, it
+    pauses until you move the mouse or press a key.
+  - *Only after I move the mouse or press a key*: each input starts a scan of
+    up to 10 s.
+
+**Limits:** a *failed look* is one face in view that keeps not matching for
+about 2 s. Frames with no face never count. After 3 failed looks, scanning
+stops until the display sleeps and wakes again. After 5 in one lock session,
+or if a typed password didn't unlock the Mac, it stops until you unlock
+manually.
+
+## Security model and limitations
+
+See the warning at the top and [SECURITY.md](SECURITY.md) for the threat
+model. In short:
+
+- It resists another person's face and a still photo. It does **not** reliably
+  resist a video, a mask or a skilled attacker with physical access.
+- Matching is strict by default, and every typed key is preceded by a check
+  that your own session's lock screen is in front.
+- A SHA-256 of the face template, together with the threshold and liveness
+  setting, is kept in the Keychain. If any of them is changed behind
+  FaceUnlock's back, it refuses to unlock and asks you to re-enrol or choose
+  the setting again.
+- The password is decoded into memory the app controls and overwritten after
+  typing. Copies inside macOS (Keychain, event system, password field) are
+  outside its control.
+
+## Privacy
+
+- Everything runs on your Mac. FaceUnlock contains no networking code and
+  sends nothing anywhere.
+- Camera frames are processed in memory and never saved.
+- Stored data:
+  - `~/Library/Application Support/FaceUnlock/face-template.json`: face
+    embeddings (numbers only). The folder is owner-only (0700) and the file
+    is owner-only (0600).
+  - `~/Library/Application Support/FaceUnlock/diagnostics.log`: attempt
+    diagnostics with scores, states, timings and reasons. It never contains
+    the password, embeddings or images. It is 0600 and rotated at about 1 MB.
+  - Login Keychain, service `uk.co.sid.faceunlock`: the password
+    (`macos-login-password`) and the integrity record (`integrity`).
+  - Preferences (`defaults read uk.co.sid.faceunlock`): settings and the last
+    lock-screen attempt result.
+
+## Troubleshooting
+
+- **I can't see the menu-bar icon.** On Macs with a notch, a full menu bar
+  can hide it. Open FaceUnlock again from Spotlight or Finder to get the
+  Setup window, which has everything the menu has.
+- **It didn't unlock.** The *Lock-screen test* step shows what went wrong.
+  More detail is in `~/Library/Application Support/FaceUnlock/diagnostics.log`,
+  and key lines also go to the unified log:
+  `log show --last 10m --predicate 'subsystem == "uk.co.sid.faceunlock"'`.
+- **Permissions look granted but the app says they're missing.** This usually
+  happens after a rebuild with a different signature. Remove FaceUnlock from
+  System Settings › Privacy & Security › Camera / Accessibility, add it again,
+  and restart the app.
+- **A Keychain prompt asks about FaceUnlock.** Click *Always Allow*. Nobody
+  can answer a prompt at the lock screen, so FaceUnlock never shows one
+  there. If the stored password can't be read without a prompt, the menu
+  says so; save the password again in Setup step 3.
+- **"Template changed – re-enrol".** The template file, threshold or liveness
+  setting no longer matches the Keychain record. Re-enrol, or choose the
+  setting again in the menu.
+
+## Uninstall
+
+1. Quit FaceUnlock from its menu (or run `killall FaceUnlock`).
+2. Optional, from the menu first: **Delete face data and password…**.
+3. Delete the app from `/Applications` or `~/Applications`.
+4. Remove its data:
+
+   ```bash
+   rm -rf ~/Library/Application\ Support/FaceUnlock
+   security delete-generic-password -s uk.co.sid.faceunlock -a macos-login-password
+   security delete-generic-password -s uk.co.sid.faceunlock -a integrity
+   defaults delete uk.co.sid.faceunlock
+   ```
+
+5. Remove FaceUnlock from System Settings › Privacy & Security ›
+   Accessibility (and Camera), and from System Settings › General › Login
+   Items if it's listed.
+
+## Building and testing
+
+```bash
+swift build      # debug build
+swift test       # unit tests (no camera or permissions needed)
+./build.sh       # release app bundle in build/
+./release.sh     # dist/FaceUnlock-<version>.zip + .sha256 (notarises if configured)
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+### Project layout
+
+| Path | What |
+| --- | --- |
+| `Sources/FaceUnlockCore/` | Testable logic and the Vision / Core ML face pipeline |
+| `Sources/FaceUnlock/` | The menu-bar app: camera, lock handling, Keychain, typing, HUD, Setup window |
+| `Tests/FaceUnlockCoreTests/` | Unit tests |
+| `Models/SFace.mlpackage` | Face-embedding model (Apache-2.0) |
+| `tools/convert_sface.py` | Converts the original ONNX model to Core ML with a parity check |
+| `docs/` | Documentation assets (screenshots to come) |
+
+## Credits
+
+- **SFace** face-recognition model by Yaoyao Zhong et al., distributed by
+  [OpenCV Zoo](https://github.com/opencv/opencv_zoo) under Apache-2.0.
+- Approach informed by [Glance](https://github.com/jonnyoo/glance) (MIT) and
+  [SkyLightWindow](https://github.com/Lakr233/SkyLightWindow) (MIT).
+
+Full attributions are in [NOTICE](NOTICE).
+
+## Licence
+
+[MIT](LICENSE). The bundled SFace model is Apache-2.0; see
+`Models/LICENSE-SFace.txt`.
