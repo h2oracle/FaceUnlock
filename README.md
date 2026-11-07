@@ -176,8 +176,9 @@ window.
   movement) or 8 s (blink + movement) while the evidence stops improving,
   such as a photo of you.
 
-Frames with no face, or with a face that is too turned, too small, cut off or
-blurry, never count; the indicator asks you to look at the screen. At most
+Frames with no face, or with a *non-matching* face that is too turned, too
+small or has its eyes or nose out of the picture, never count. A face that
+matches always counts as a match, however it's framed; the indicator asks you to look at the screen. At most
 one failed look is counted every 2 s. After 3 failed looks the indicator
 shows "Face Not Recognised" and scanning pauses. After 2 s, moving the mouse
 or pressing a key (or the display waking) starts it again. It stops until

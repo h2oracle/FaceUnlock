@@ -146,7 +146,8 @@ public struct UnlockEvaluator: Sendable {
         lastFaceCount = frame.faceCount
         lastScore = frame.score
         lastMatched = false
-        lastUsable = frame.faceCount == 1 && frame.usable && frame.score != nil
+        let isMatchNow = frame.faceCount == 1 && frame.score.map(policy.isMatch) == true
+        lastUsable = isMatchNow || (frame.faceCount == 1 && frame.usable && frame.score != nil)
         lastUnusableReason = frame.faceCount == 1 && !lastUsable ? (frame.unusableReason ?? "unreadable") : nil
         lastResetReason = nil
         lastEyeRatio = nil
@@ -155,8 +156,12 @@ public struct UnlockEvaluator: Sendable {
             sawMultipleFaces = true
             gapStart = nil
             resetEvidence(.multipleFaces)
-        } else if frame.faceCount == 0 || !frame.usable || frame.score == nil {
-            // No usable face: neither a match nor a non-match. Evidence (which
+        } else if frame.faceCount == 0 || frame.score == nil
+                    || (!frame.usable && !policy.isMatch(frame.score!)) {
+            // No face, or a non-matching face too poor to judge: neither a
+            // match nor a non-match. (A face that matches always counts as a
+            // match, whatever its quality: the gate only protects the owner
+            // from failed looks, it never blocks evidence.) Evidence (which
             // only ever comes from matched frames) survives short gaps; after
             // `maximumGap` someone else could have stepped in, so start over.
             if frame.faceCount == 1 { sawFace = true }

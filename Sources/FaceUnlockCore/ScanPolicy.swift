@@ -152,8 +152,9 @@ public struct ScanMonitor: Equatable, Sendable {
             // A second face ends the appearance immediately.
             return emit(endAppearance(), at: time)
         }
-        if faceCount == 0 || !usable {
-            // Neither a match nor a non-match; long gaps end the appearance.
+        if faceCount == 0 || (!usable && !matched) {
+            // Neither a match nor a non-match (a matching frame always
+            // counts as a match); long gaps end the appearance.
             guard inAppearance else { return nil }
             let start = gapStart ?? time
             gapStart = start

@@ -88,7 +88,9 @@ final class FaceSessionProcessor: @unchecked Sendable {
         if shouldReset { evaluator = UnlockEvaluator(policy: policy, liveness: liveness) }
         if lock.withLock({ finished }) { return }
 
-        let analysis = analyzer.analyze(pixelBuffer: pixelBuffer, wantQuality: true)
+        // No capture-quality request here: it cost ~25 % of the frame rate,
+        // and size, angle and landmarks are enough to judge non-matches.
+        let analysis = analyzer.analyze(pixelBuffer: pixelBuffer)
         let score = analysis.embedding.map { MatchScore.score($0, against: template) }
         let observation = FrameObservation(
             time: time,

@@ -144,6 +144,39 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         }
     }
 
+    @Test func clippedButMatchingFaceUnlocksAsFastAsUnclipped() throws {
+        // 16:08 on the real lock screen: the owner sat close, the face box ran
+        // past the top edge and every frame was classed unusable ("cut off")
+        // although it matched. Matching frames must count regardless.
+        func firstUnlock(usable: Bool) -> Double? {
+            var face = SyntheticFace(flat: false, seed: 2)
+            var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
+            for i in 0..<150 {
+                let t = Double(i) / fps
+                var f = face.frame(time: t, pose: normalHead(t), score: 0.85)
+                f.usable = usable
+                f.unusableReason = usable ? nil : "cut off"
+                if e.observe(f).shouldUnlock { return t }
+            }
+            return nil
+        }
+        let clipped = try #require(firstUnlock(usable: false))
+        let unclipped = try #require(firstUnlock(usable: true))
+        #expect(clipped == unclipped)
+    }
+
+    @Test func unusableNonMatchingFramesAreAGap() {
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
+        var face = SyntheticFace(flat: false)
+        for i in 0..<10 { e.observe(face.frame(time: Double(i) / fps, pose: normalHead(Double(i) / fps))) }
+        let run = e.snapshot.consecutiveMatches
+        var f = face.frame(time: 0.4, pose: normalHead(0.4), score: 0.2)
+        f.usable = false
+        let s = e.observe(f)
+        #expect(!s.frameMatched && s.resetReason == nil)
+        #expect(s.consecutiveMatches == run)
+    }
+
     @Test func perfectlyStillRealHeadWaits() {
         var face = SyntheticFace(flat: false)
         #expect(run(&face, seconds: 5, pose: { _ in SyntheticFace.Pose() }).unlockAt == nil)

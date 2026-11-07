@@ -152,7 +152,11 @@ import Testing
         #expect(!frame(pitch: -25).isUsable)
         #expect(!frame(quality: 0.1).isUsable)
         #expect(!frame(box: CGRect(x: 0.4, y: 0.4, width: 0.05, height: 0.07)).isUsable)
-        #expect(!frame(box: CGRect(x: 0.8, y: 0.3, width: 0.25, height: 0.35)).isUsable) // cut off
+        // A box past the edge is fine; landmarks outside the image are not.
+        #expect(frame(box: CGRect(x: 0.35, y: 0.75, width: 0.25, height: 0.35)).isUsable)
+        var cut = frame()
+        cut.keyLandmarksInFrame = false
+        #expect(!cut.isUsable)
         var noEmbedding = frame()
         noEmbedding.embedding = nil
         #expect(!noEmbedding.isUsable)

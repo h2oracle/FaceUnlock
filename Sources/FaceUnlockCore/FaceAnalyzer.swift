@@ -15,6 +15,9 @@ public struct FrameAnalysis: @unchecked Sendable {
     /// True when yaw/pitch were estimated from the landmarks because Vision
     /// didn't report a pose for this observation.
     public var poseEstimated = false
+    /// False when an eye or nose landmark lies outside the image (the face
+    /// is really cut off). A face box running past the edge is fine.
+    public var keyLandmarksInFrame = true
     /// VNDetectFaceCaptureQualityRequest score (0–1), only when requested.
     public var captureQuality: Float?
     public var leftEyeOpenness: Double?
@@ -148,6 +151,8 @@ public final class FaceAnalyzer: @unchecked Sendable {
         }
 
         let leftEye = points(landmarks.leftEye), rightEye = points(landmarks.rightEye)
+        let bounds = CGRect(origin: .zero, size: size)
+        result.keyLandmarksInFrame = (leftEye + rightEye + points(landmarks.nose)).allSatisfy { bounds.contains($0) }
         result.leftEyeOpenness = LandmarkGeometry.eyeOpenness(leftEye)
         result.rightEyeOpenness = LandmarkGeometry.eyeOpenness(rightEye)
 
@@ -214,8 +219,6 @@ public enum FrameQualityGate {
     public static let maximumPitch: Double = 20
     /// Face width as a fraction of the frame width.
     public static let minimumFaceWidth: CGFloat = 0.10
-    /// The face box must stay this far inside the frame edges.
-    public static let edgeMargin: CGFloat = 0.01
 
     public static func isUsable(_ f: FrameAnalysis) -> Bool { problem(f) == nil }
 
@@ -227,11 +230,8 @@ public enum FrameQualityGate {
         if let q = f.captureQuality, q < minimumQuality { return "quality" }
         if let yaw = f.yawDegrees, abs(yaw) > maximumYaw { return "turned" }
         if let pitch = f.pitchDegrees, abs(pitch) > maximumPitch { return "tilted" }
-        guard let box = f.boundingBox else { return nil }
-        if box.width < minimumFaceWidth { return "small" }
-        if box.minX < edgeMargin || box.minY < edgeMargin || box.maxX > 1 - edgeMargin || box.maxY > 1 - edgeMargin {
-            return "cut off"
-        }
+        if !f.keyLandmarksInFrame { return "cut off" }
+        if let box = f.boundingBox, box.width < minimumFaceWidth { return "small" }
         return nil
     }
 }

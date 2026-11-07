@@ -196,11 +196,11 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
             #expect(s.blinked)
             #expect(!s.frameMatched && !s.frameUsable)
         }
-        // …but more than 0.7 s of them resets it.
+        // …but more than 0.7 s of unusable non-matching frames resets it.
         var last: UnlockEvaluator.Snapshot?
         for k in 5..<20 {
             let t = (12.0 + Double(k)) / 15
-            last = e.observe(FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.9, bestSample: 0.9),
+            last = e.observe(FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.3, bestSample: 0.3),
                                               eyes: nil, yawDegrees: 0, pitchDegrees: 0, usable: false))
         }
         #expect(last?.blinked == false)
