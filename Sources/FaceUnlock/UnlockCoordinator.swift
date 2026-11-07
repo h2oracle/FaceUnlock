@@ -105,7 +105,9 @@ final class UnlockCoordinator {
     /// Timing of the current scan, for the diagnostics breakdown.
     private struct Timing {
         var trigger: ScanTrigger
+        /// When startRunning was requested.
         var start: TimeInterval
+        var cameraFrame: TimeInterval?
         var inputAt: TimeInterval?
         var firstFrame: TimeInterval?
         var firstFace: TimeInterval?
@@ -122,6 +124,8 @@ final class UnlockCoordinator {
     private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     func start() {
+        // Configure the camera now (no light) so a lock only has to start it.
+        prepareCamera()
         let distributed = DistributedNotificationCenter.default()
         let workspace = NSWorkspace.shared.notificationCenter
 
@@ -190,6 +194,9 @@ final class UnlockCoordinator {
         onLockSessionBegan?()
         prepareCamera()
         startFastTimer()
+        // Start the camera right away (frames are discarded until the grace
+        // period ends); it takes the camera ~0.7 s to deliver frames.
+        trigger(.tick)
     }
 
     private func endLockSession() {
@@ -428,6 +435,7 @@ final class UnlockCoordinator {
         diag(String(format: "scan %d started: trigger=%@ mode=%@ sinceLock=%.1fs idle=%.1fs liveness=%@ threshold=%.2f",
                     id, trigger.rawValue, gate.mode.rawValue, t - lockStartedAt, idle, liveness.rawValue, policy.threshold))
 
+        diag(String(format: "camera: startRunning requested %.0f ms after lock", (t - lockStartedAt) * 1000))
         let processor = FaceSessionProcessor(
             analyzer: analyzer, template: template, policy: policy, liveness: liveness,
             ignoreFramesBefore: lockStartedAt + Self.gracePeriodAfterLock,
@@ -436,10 +444,11 @@ final class UnlockCoordinator {
                 let matched = readout.snapshot.frameMatched
                 let live = readout.snapshot.livenessSatisfied
                 let usable = readout.snapshot.frameUsable
+                let inattentive = readout.snapshot.frameMatched && readout.snapshot.attentionProblem != nil
                 let liveProgress = readout.snapshot.livenessProgress
                 Task { @MainActor in
                     self?.frameObserved(id: id, faceCount: faces, matched: matched, live: live,
-                                        usable: usable, livenessProgress: liveProgress)
+                                        usable: usable, inattentive: inattentive, livenessProgress: liveProgress)
                 }
             },
             onDiagnostics: { line in Diagnostics.write("  \(line)") }
@@ -496,10 +505,13 @@ final class UnlockCoordinator {
     }
 
     private func frameObserved(id: Int, faceCount: Int, matched: Bool, live: Bool, usable: Bool,
-                               livenessProgress: Double) {
+                               inattentive: Bool, livenessProgress: Double) {
         guard id == scanID, processor != nil, var monitor else { return }
         let t = now
-        if timing?.firstFrame == nil { timing?.firstFrame = t }
+        if timing?.firstFrame == nil {
+            timing?.firstFrame = t
+            timing?.cameraFrame = processor?.firstCameraFrameAt
+        }
         if faceCount > 0, timing?.firstFace == nil { timing?.firstFace = t }
         let event = monitor.observe(time: t, faceCount: faceCount, matched: matched, live: live,
                                     usable: usable, livenessProgress: livenessProgress)
@@ -515,7 +527,7 @@ final class UnlockCoordinator {
             }
         }
         overlay.setVisible(monitor.hudVisible(at: t))
-        overlay.setHint(monitor.shouldAskToFaceScreen(at: t) ? "Look at the screen" : nil)
+        overlay.setHint(inattentive || monitor.shouldAskToFaceScreen(at: t) ? "Look at the screen" : nil)
         guard let event else { return }
         failedLook(event)
     }
@@ -651,11 +663,15 @@ final class UnlockCoordinator {
             return String(format: "%.0fms", (b - a) * 1000)
         }
         var line = "timing: trigger=\(t.trigger.rawValue)"
-        line += " scanStart→firstFrame=\(ms(t.start, t.firstFrame))"
+        line += " lock→startRunning=\(ms(lockStartedAt, t.start))"
+        line += " startRunning→cameraFrame=\(ms(t.start, t.cameraFrame))"
+        line += " cameraFrame→firstUsedFrame=\(ms(t.cameraFrame, t.firstFrame))"
+        line += " firstUsedFrame→firstFace=\(ms(t.firstFrame, t.firstFace))"
         line += " firstFace→match=\(ms(t.firstFace, t.match))"
         line += " match→typingDone=\(ms(t.match, t.typingDone))"
         line += " typingDone→unlocked=\(ms(t.typingDone, unlockedAt))"
         line += " scanStart→unlocked=\(ms(t.start, unlockedAt))"
+        line += " lock→unlocked=\(ms(lockStartedAt, unlockedAt))"
         if let input = t.inputAt { line += " lastInput→unlocked=\(ms(input, unlockedAt))" }
         diag(line)
     }

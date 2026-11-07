@@ -226,7 +226,56 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         for i in 0..<10 where at == nil {
             if e.observe(face.frame(time: Double(i) / fps, pose: SyntheticFace.Pose())).shouldUnlock { at = i }
         }
-        #expect(at == 2)
+        // Needs 5 attentive frames at the end, not just 3 matches (the first
+        // frame can't be judged yet: no open-eye level calibrated).
+        #expect(at == 5)
+    }
+
+    // MARK: Attention (the 16:17 lock-screen incident)
+
+    @Test func ownerTurnedAwayNeverUnlocksEvenAboveThreshold() {
+        // The owner's face, turned 20–40° (score above the threshold), moving.
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: false, seed: UInt64(seed))
+            let r = run(&face, seconds: 10, pose: { t in
+                SyntheticFace.Pose(yaw: 30 + 10 * sin(2 * .pi * 0.5 * t), pitch: 3 * sin(t))
+            })
+            #expect(r.unlockAt == nil, "seed \(seed)")
+            #expect(r.last?.attentionProblem == "not facing the screen")
+        }
+    }
+
+    @Test func closedEyesNeverUnlock() {
+        for seed in 1...3 {
+            var face = SyntheticFace(flat: false, seed: UInt64(seed))
+            face.blink = { _ in 0.15 } // eyes (nearly) shut the whole time
+            #expect(run(&face, seconds: 10, pose: normalHead).unlockAt == nil, "seed \(seed)")
+        }
+    }
+
+    @Test func turningAwayAfterLivenessDoesNotUnlock() {
+        // Frontal briefly (too short to finish), then the head turns away to
+        // 30°: the turn produces plenty of parallax, but the final state is
+        // turned, so it must not unlock while turned away.
+        var face = SyntheticFace(flat: false, seed: 7)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
+        var unlockedYaw: Double?
+        for i in 0..<240 where unlockedYaw == nil {
+            let t = Double(i) / fps
+            let yaw = t < 0.2 ? 0 : min(30, (t - 0.2) * 40)
+            let snap = e.observe(face.frame(time: t, pose: SyntheticFace.Pose(yaw: yaw, pitch: 1)))
+            if snap.shouldUnlock { unlockedYaw = yaw }
+        }
+        #expect(unlockedYaw == nil || unlockedYaw! <= 12, "unlocked at yaw \(unlockedYaw ?? -1)")
+    }
+
+    @Test func borderlineScoresNeverUnlock() {
+        var face = SyntheticFace(flat: false, seed: 3)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
+        for i in 0..<150 {
+            let t = Double(i) / fps
+            #expect(!e.observe(face.frame(time: t, pose: normalHead(t), score: 0.58)).shouldUnlock)
+        }
     }
 
     @Test func nonMatchingFrameResetsMovementEvidence() {

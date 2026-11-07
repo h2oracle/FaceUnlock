@@ -175,6 +175,7 @@ extension TestModel {
                             s.motionSeconds, s.motionRotation, s.motionParallax * 100, s.motionSignalToNoise))
         if s.faceCount == 1 && !s.frameUsable { lines.append("Face not usable:    look straight at the screen") }
         lines.append("Liveness (\(s.livenessMode.title)): \(s.livenessSatisfied ? "✓" : "waiting")")
+        lines.append("Attention:          \(s.attentionProblem ?? (s.frameMatched ? "facing screen, eyes open ✓" : "–"))  (\(s.attentiveRun)/5)")
         self.lines = lines
         if s.shouldUnlock { passed = true }
     }

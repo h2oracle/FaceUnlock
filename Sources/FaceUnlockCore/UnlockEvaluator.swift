@@ -46,6 +46,38 @@ public struct FrameObservation: Sendable {
 /// faces, a non-matching or un-embeddable face) wipes all evidence. So the
 /// whole sequence – matched open eyes, matched blink, matched frames after
 /// the blink – has to come from one continuous run of the owner's face.
+/// "Require attention", as with Face ID: the frames that finally unlock
+/// must show the owner facing the screen with open eyes and a clearly
+/// strong match. Liveness evidence may come from earlier frames, but turning
+/// away, closing the eyes or a borderline score can never be the state that
+/// unlocks.
+public struct AttentionPolicy: Equatable, Sendable {
+    public var requiredFrames = 5
+    public var maximumYaw: Double = 12
+    public var maximumPitch: Double = 15
+    /// Each eye must be at least this fraction of its calibrated open level…
+    public var minimumOpenRatio: Double = 0.6
+    /// …and at least this open in absolute terms (area / width²; open eyes
+    /// measure ≈0.14–0.19 on real data, closed ≈0.01–0.06).
+    public var minimumOpenness: Double = 0.07
+    /// The score must clear the threshold by this much.
+    public var scoreMargin: Float = 0.05
+
+    public init() {}
+
+    /// nil if attentive, otherwise why not.
+    public func problem(score: MatchScore, threshold: Float, yaw: Double?, pitch: Double?,
+                        eyes: EyeSample?, eyeRatios: (left: Double, right: Double)?) -> String? {
+        guard score.centroid >= threshold + scoreMargin else { return "weak match" }
+        guard let yaw, let pitch else { return "pose unknown" }
+        guard abs(yaw) <= maximumYaw, abs(pitch) <= maximumPitch else { return "not facing the screen" }
+        guard let eyes, let ratios = eyeRatios else { return "eyes not measured" }
+        guard eyes.left >= minimumOpenness, eyes.right >= minimumOpenness,
+              ratios.left >= minimumOpenRatio, ratios.right >= minimumOpenRatio else { return "eyes closed" }
+        return nil
+    }
+}
+
 public struct UnlockEvaluator: Sendable {
     /// Why evidence was wiped on a frame (for diagnostics).
     public enum ResetReason: String, Sendable, CaseIterable {
@@ -92,9 +124,16 @@ public struct UnlockEvaluator: Sendable {
         public var progress: Double = 0
         /// 0…1 progress of the liveness check alone.
         public var livenessProgress: Double = 0
+        /// Consecutive matched frames that were also attentive.
+        public var attentiveRun: Int = 0
+        /// Why the latest matched frame wasn't attentive (nil if it was).
+        public var attentionProblem: String?
     }
 
     public let policy: MatchPolicy
+    public let attention = AttentionPolicy()
+    private var attentiveRun = 0
+    private var lastAttentionProblem: String?
     public let livenessMode: LivenessMode
     private var motion: NaturalMovementCheck
     private var counter: ConsecutiveMatchCounter
@@ -135,6 +174,7 @@ public struct UnlockEvaluator: Sendable {
     private mutating func resetEvidence(_ reason: ResetReason) {
         if hasEvidence { lastResetReason = reason }
         counter.reset()
+        attentiveRun = 0
         blink.reset()
         pose.reset()
         motion.reset()
@@ -151,6 +191,7 @@ public struct UnlockEvaluator: Sendable {
         lastUnusableReason = frame.faceCount == 1 && !lastUsable ? (frame.unusableReason ?? "unreadable") : nil
         lastResetReason = nil
         lastEyeRatio = nil
+        lastAttentionProblem = nil
 
         if frame.faceCount > 1 {
             sawMultipleFaces = true
@@ -176,6 +217,13 @@ public struct UnlockEvaluator: Sendable {
             if let score = frame.score, policy.isMatch(score) {
                 lastMatched = true
                 counter.record(matched: true)
+                // Attention is judged against the open-eye level calibrated so
+                // far (before this frame updates it).
+                let ratios = frame.eyes.flatMap { blink.ratios(for: $0) }
+                lastAttentionProblem = attention.problem(score: score, threshold: policy.threshold,
+                                                         yaw: frame.yawDegrees, pitch: frame.pitchDegrees,
+                                                         eyes: frame.eyes, eyeRatios: ratios)
+                attentiveRun = lastAttentionProblem == nil ? attentiveRun + 1 : 0
                 let blinkedBefore = blink.hasBlinked
                 if let eyes = frame.eyes {
                     if let r = blink.ratios(for: eyes) { lastEyeRatio = min(r.left, r.right) }
@@ -215,6 +263,7 @@ public struct UnlockEvaluator: Sendable {
             liveProgress = 1
         }
         let unlock = lastFaceCount == 1 && lastMatched && counter.isSatisfied && live
+            && attentiveRun >= attention.requiredFrames
         let matchProgress = min(1, Double(counter.run) / Double(counter.required))
         return Snapshot(
             faceCount: lastFaceCount,
@@ -242,7 +291,9 @@ public struct UnlockEvaluator: Sendable {
             motionSeconds: motion.duration,
             livenessSatisfied: live,
             progress: unlock ? 1 : (matchProgress + liveProgress) / 2,
-            livenessProgress: liveProgress
+            livenessProgress: liveProgress,
+            attentiveRun: attentiveRun,
+            attentionProblem: lastAttentionProblem
         )
     }
 }

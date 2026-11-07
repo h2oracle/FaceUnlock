@@ -222,7 +222,26 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         for i in 0..<12 { e.observe(frame(i, eye: eye(i))) }   // blink completes at 11
         #expect(e.snapshot.matchesSinceBlink == 1)
         #expect(!e.observe(frame(12)).shouldUnlock)              // 2 after blink
-        #expect(e.observe(frame(13)).shouldUnlock)               // 3 after blink
+        // 3 matched frames after the blink are enough for liveness, but the
+        // final run must also be 5 attentive (eyes-open) frames.
+        #expect(!e.observe(frame(13)).shouldUnlock)
+        #expect(!e.observe(frame(14)).shouldUnlock)
+        #expect(e.observe(frame(15)).shouldUnlock)
+    }
+
+    @Test func attentionNeedsFacingTheScreenOpenEyesAndAStrongScore() {
+        let a = AttentionPolicy()
+        let good = MatchScore(centroid: 0.8, bestSample: 0.8)
+        let eyes = EyeSample(time: 0, left: 0.15, right: 0.15, faceShape: 1.2)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 3, pitch: -4, eyes: eyes, eyeRatios: (1, 1)) == nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 20, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 18, eyes: eyes, eyeRatios: (1, 1)) != nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: nil, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
+        #expect(a.problem(score: MatchScore(centroid: 0.58, bestSample: 0.9), threshold: 0.55, yaw: 0, pitch: 0,
+                          eyes: eyes, eyeRatios: (1, 1)) == "weak match")
+        let closed = EyeSample(time: 0, left: 0.03, right: 0.03, faceShape: 1.2)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 0, eyes: closed, eyeRatios: (1, 1)) == "eyes closed")
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 0, eyes: eyes, eyeRatios: (0.4, 1)) == "eyes closed")
     }
 
     @Test func photoOfOwnerNeverUnlocks() {

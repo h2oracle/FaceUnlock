@@ -58,7 +58,13 @@ live person, it types your login password into the lock screen for you.
    sample. Both must reach the threshold on 3 consecutive frames.
 4. **Liveness**: evidence is only taken from frames that match you. Any frame
    that doesn't match resets it.
-5. **Unlock**: it re-checks that your session's lock screen is the window in
+5. **Attention**: like Face ID's "Require Attention", the last 5 matched
+   frames before unlocking must all show you facing the screen (yaw ≤ 12°,
+   pitch ≤ 15°), with both eyes open and a score at least 0.05 above the
+   threshold. Turning away or closing your eyes can never be what unlocks
+   it, even if earlier frames already proved liveness. The indicator says
+   "Look at the screen" when the match is good but attention is missing.
+6. **Unlock**: it re-checks that your session's lock screen is the window in
    front, then types the password one character at a time and presses Return.
 
 Only numbers describing your face (embeddings) are saved. Images are never
@@ -155,7 +161,8 @@ window.
     strongest webcam check, but a video of you can still pass.
   - *Off*: face match only. A photo of you can unlock. Not recommended.
 - **Match strictness** (asks for your password): Relaxed 0.55, Standard 0.70
-  (default) or Strict 0.80. *Test recognition* shows your typical score and
+  (default) or Strict 0.80. Set-ups still on the old 0.55 get a warning in
+  the menu and the Setup window, with a one-click switch to 0.70. *Test recognition* shows your typical score and
   suggests a stricter value if you have plenty of headroom.
 - **Start scanning** (no password needed, because it doesn't affect matching):
   - *Automatically when the lock screen shows* (default): the camera scans

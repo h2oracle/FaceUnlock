@@ -34,6 +34,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
     private var finished = false
     private var _sawFace = false
     private var _diagnostics = AttemptDiagnostics()
+    private var _firstCameraFrameAt: TimeInterval?
     private var summarizer: DiagnosticsSummarizer?
 
     /// Frames with an earlier timestamp (system uptime) are dropped unseen.
@@ -64,6 +65,8 @@ final class FaceSessionProcessor: @unchecked Sendable {
     }
 
     var sawFace: Bool { lock.withLock { _sawFace } }
+    /// Uptime of the first frame the camera delivered (even if discarded).
+    var firstCameraFrameAt: TimeInterval? { lock.withLock { _firstCameraFrameAt } }
     /// Whole-attempt summary used to explain a failure.
     var diagnostics: AttemptDiagnostics { lock.withLock { _diagnostics } }
 
@@ -79,6 +82,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
     }
 
     func process(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) {
+        lock.withLock { if _firstCameraFrameAt == nil { _firstCameraFrameAt = time } }
         guard time >= ignoreFramesBefore else { return }
         let shouldReset: Bool = lock.withLock {
             let r = resetRequested

@@ -185,7 +185,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.refreshSetup()
                 if self.openSetupAfterFirstLoad {
                     self.openSetupAfterFirstLoad = false
-                    if !self.setupModel.progress.requiredComplete || self.setupModel.livenessProposal != nil {
+                    let loose = self.template != nil && (record?.threshold ?? 1) < MatchPolicy.defaultThreshold - 0.001
+                    if !self.setupModel.progress.requiredComplete || self.setupModel.livenessProposal != nil || loose {
                         self.showSetup()
                     }
                 }
@@ -317,6 +318,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Setup…", #selector(openSetup)))
         menu.addItem(.separator())
 
+        if template != nil, verifiedPolicy.threshold < MatchPolicy.defaultThreshold - 0.001 {
+            let loose = item(String(format: "⚠︎ Match threshold %.2f is loose – Use the recommended %.2f…",
+                                    verifiedPolicy.threshold, MatchPolicy.defaultThreshold),
+                             #selector(useRecommendedThreshold))
+            menu.addItem(loose)
+            menu.addItem(.separator())
+        }
         let header = NSMenuItem(title: "FaceUnlock – \(coordinator.status)", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
@@ -529,6 +537,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setScanStart(_ mode: ScanStartMode) {
         Settings.scanStartMode = mode
         refreshSetup()
+    }
+
+    @objc private func useRecommendedThreshold() {
+        applyThreshold(MatchPolicy.defaultThreshold)
     }
 
     @objc private func setThreshold(_ sender: NSMenuItem) {
@@ -830,6 +842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         m.livenessMode = Settings.livenessMode
         m.scanStartMode = Settings.scanStartMode
         m.threshold = verifiedPolicy.threshold
+        m.hasTemplate = template != nil
         let threshold = String(format: "%.2f", verifiedPolicy.threshold)
         if let digest = templateDigest, SetupStore.testPassedForDigest == digest {
             conditions[.test] = .done

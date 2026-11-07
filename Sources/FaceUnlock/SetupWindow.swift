@@ -29,6 +29,7 @@ final class SetupModel {
     var livenessProposal: LivenessMode?
     var scanStartMode: ScanStartMode = .automatic
     var threshold: Float = MatchPolicy.defaultThreshold
+    var hasTemplate = false
     /// Median score of the user's matching frames in the Test step.
     var typicalScore: Float?
 
@@ -109,6 +110,21 @@ struct SetupView: View {
                 Text("Unlock this Mac's lock screen by looking at the built-in camera.")
                     .foregroundStyle(.secondary)
             }
+        }
+        if model.threshold < MatchPolicy.defaultThreshold - 0.001 && model.hasTemplate {
+            HStack(alignment: .top) {
+                Label(String(format: "Your match threshold is %.2f (loose). Use the recommended %.2f.",
+                             model.threshold, MatchPolicy.defaultThreshold),
+                      systemImage: "exclamationmark.shield.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Spacer()
+                Button(String(format: "Use %.2f…", MatchPolicy.defaultThreshold)) {
+                    actions.applyThreshold(MatchPolicy.defaultThreshold)
+                }
+            }
+            .padding(12)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
         }
         if let proposal = model.livenessProposal {
             VStack(alignment: .leading, spacing: 8) {
