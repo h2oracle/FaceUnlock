@@ -161,8 +161,8 @@ extension TestModel {
     func apply(_ r: LiveReadout) {
         let s = r.snapshot
         if s.faceCount == 1, s.frameMatched, let score = s.score {
-            noteScore(score.centroid)
-            if score.centroid >= threshold + 0.05, let y = s.latestYaw, let p = s.latestPitch {
+            noteScore(score.value)
+            if score.value >= threshold + 0.05, let y = s.latestYaw, let p = s.latestPitch {
                 strongPoses.append((y, p))
                 if strongPoses.count > 90 { strongPoses.removeFirst(strongPoses.count - 90) }
             }
@@ -171,7 +171,8 @@ extension TestModel {
         lines.append("Faces in frame:     \(s.faceCount)\(s.faceCount > 1 ? "  (only one allowed)" : "")")
         if let score = s.score {
             let verdict = s.frameMatched ? "match" : "no match"
-            lines.append(String(format: "Match (avg / best): %.3f / %.3f  vs %.2f  %@", score.centroid, score.bestSample, threshold, verdict))
+            lines.append(String(format: "Match %.3f (avg %.3f, top-3 %.3f)  vs %.2f  %@",
+                                score.value, score.centroid, score.topK, threshold, verdict))
         } else {
             lines.append("Match:              –")
         }

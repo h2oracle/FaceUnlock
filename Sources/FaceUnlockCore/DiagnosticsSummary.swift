@@ -48,7 +48,7 @@ public struct DiagnosticsSummarizer: Sendable {
         totalFrames += 1
         faces[min(s.faceCount, 2)] += 1
         latest = s
-        if let score = s.score?.centroid { bestScore = max(bestScore ?? -1, score) }
+        if let score = s.score?.value { bestScore = max(bestScore ?? -1, score) }
         if let o = eyeOpenness {
             opennessMin = min(opennessMin ?? o, o)
             opennessMax = max(opennessMax ?? o, o)
@@ -67,7 +67,7 @@ public struct DiagnosticsSummarizer: Sendable {
         func d(_ v: Double?, _ fmt: String = "%.3f") -> String { v.map { String(format: fmt, $0) } ?? "-" }
         var line = String(format: "t=%.1fs", time - start)
         line += " frames=\(frames) faces(0/1/many)=\(faces[0])/\(faces[1])/\(faces[2])"
-        line += " score best=\(f(bestScore)) latest=\(f(s.score?.centroid)) thr=\(f(threshold))"
+        line += " score best=\(f(bestScore)) latest=\(f(s.score?.value)) (avg \(f(s.score?.centroid)) top3 \(f(s.score?.topK))) thr=\(f(threshold))"
         line += " run=\(s.consecutiveMatches)/\(s.requiredConsecutive)"
         line += " eyes=\(d(opennessMin))..\(d(opennessMax)) ratioMin=\(d(ratioMin, "%.2f"))"
         line += " blink=\(s.blinkState) afterBlink=\(s.matchesSinceBlink)"

@@ -20,6 +20,10 @@ First public release.
   (within 18° of the owner's enrolled or learned screen-facing pose) with both eyes
   open and a score at least 0.05
   above the threshold. Loose legacy thresholds get a prominent warning.
+- Matching uses the better of the averaged template and the top-3 sample
+  mean; enrolment captures ~30 samples across distances and postures;
+  adaptive samples after strong unlocks (max 15, FIFO); small background
+  faces are ignored.
 - Frames are judged by a quality gate (angle, size, cut off, capture
   quality). A missing Vision pose is estimated from the landmarks rather
   than rejected.

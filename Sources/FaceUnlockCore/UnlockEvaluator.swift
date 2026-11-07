@@ -75,7 +75,7 @@ public struct AttentionPolicy: Equatable, Sendable {
     /// nil if attentive, otherwise why not.
     public func problem(score: MatchScore, threshold: Float, yaw: Double?, pitch: Double?,
                         eyes: EyeSample?, eyeRatios: (left: Double, right: Double)?) -> String? {
-        guard score.centroid >= threshold + scoreMargin else { return "weak match" }
+        guard score.value >= threshold + scoreMargin else { return "weak match" }
         guard let yaw, let pitch else { return "pose unknown" }
         guard abs(yaw - baseline.yaw) <= maximumYaw, abs(pitch - baseline.pitch) <= maximumPitch else {
             return "not facing the screen"
@@ -208,8 +208,8 @@ public struct UnlockEvaluator: Sendable {
     private mutating func learnSessionBaseline(score: MatchScore, yaw: Double?, pitch: Double?) {
         guard attention == nil, let yaw, let pitch,
               abs(yaw) <= Self.sessionLearningRange, abs(pitch) <= Self.sessionLearningRange,
-              score.centroid >= policy.threshold + AttentionPolicy().scoreMargin else { return }
-        strongPoses.append((score.centroid, yaw, pitch))
+              score.value >= policy.threshold + AttentionPolicy().scoreMargin else { return }
+        strongPoses.append((score.value, yaw, pitch))
         guard strongPoses.count >= Self.sessionBaselineFrames else { return }
         let best = strongPoses.sorted { $0.score > $1.score }.prefix(max(4, strongPoses.count / 2))
         if let b = PoseBaseline.median(best.map { ($0.yaw, $0.pitch) }) {

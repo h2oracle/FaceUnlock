@@ -53,6 +53,13 @@ has physical access to your Mac.
   need the login password. A password confirmed in the Setup window may be
   reused for 5 minutes for some changes, but never across a screen lock or
   sleep, and never for enrolling, turning liveness off or deleting data.
+- Template drift: the only template change that doesn't need the login
+  password is the automatic adaptation after a **confirmed** face unlock.
+  It requires attentive, live frames that all scored at least threshold +
+  0.10. It adds at most one sample per unlock to a 15-sample FIFO and never
+  replaces the enrolment samples or moves the averaged template. The
+  template file and its Keychain hash are updated together. So the template
+  can only drift through successful unlocks by an already-matching face.
 - Forging the Keychain items: tested on macOS 26 with a throwaway item.
   Another process running as you got `errSecAuthFailed` reading it and
   `errSecInvalidOwnerEdit` deleting it without user approval. Items it

@@ -165,3 +165,19 @@ import Testing
         #expect(!two.isUsable)
     }
 }
+
+@Suite struct SignificantFacesTests {
+    @Test func smallBackgroundFacesAreIgnored() {
+        #expect(FaceAnalyzer.significantFaces(widths: [0.30, 0.10]) == (1, 0))
+        #expect(FaceAnalyzer.significantFaces(widths: [0.08, 0.32, 0.12]) == (1, 1))
+    }
+
+    @Test func sameSizeSecondFaceStillCounts() {
+        #expect(FaceAnalyzer.significantFaces(widths: [0.30, 0.25]).count == 2)
+        #expect(FaceAnalyzer.significantFaces(widths: [0.30, 0.14]).count == 2) // ≥ 45 %
+    }
+
+    @Test func noFaces() {
+        #expect(FaceAnalyzer.significantFaces(widths: []).count == 0)
+    }
+}

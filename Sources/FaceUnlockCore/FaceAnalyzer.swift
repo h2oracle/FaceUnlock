@@ -61,6 +61,18 @@ public final class FaceAnalyzer: @unchecked Sendable {
         CGPoint(x: 70.7299, y: 92.2041),
     ]
 
+    /// Secondary faces narrower than this fraction of the largest face are
+    /// background people or false detections and are ignored.
+    public static let secondaryFaceRatio = 0.45
+
+    /// How many faces count, and the index of the largest. A same-size
+    /// second face still counts (and blocks unlocking).
+    public static func significantFaces(widths: [Double]) -> (count: Int, largest: Int?) {
+        guard let maxWidth = widths.max(), let index = widths.firstIndex(of: maxWidth) else { return (0, nil) }
+        let count = widths.filter { $0 >= secondaryFaceRatio * maxWidth }.count
+        return (count, index)
+    }
+
     private let embedder: FaceEmbedder?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     /// Reused across frames (one camera queue at a time; guarded anyway).
@@ -120,9 +132,11 @@ public final class FaceAnalyzer: @unchecked Sendable {
         let rectangles = rectanglesRequest
         do { try perform([rectangles]) } catch { return .none }
 
-        let faces = (rectangles.results ?? []).filter { $0.boundingBox.width >= Self.minimumFaceWidth }
-        var result = FrameAnalysis(faceCount: faces.count)
-        guard faces.count == 1, let face = faces.first else { return result }
+        let detected = (rectangles.results ?? []).filter { $0.boundingBox.width >= Self.minimumFaceWidth }
+        let (count, index) = Self.significantFaces(widths: detected.map { Double($0.boundingBox.width) })
+        var result = FrameAnalysis(faceCount: count)
+        guard count == 1, let index else { return result }
+        let face = detected[index]
 
         result.boundingBox = face.boundingBox
         result.yawDegrees = face.yaw.map { $0.doubleValue * 180 / .pi }

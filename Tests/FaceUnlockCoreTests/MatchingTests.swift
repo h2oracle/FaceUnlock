@@ -30,12 +30,42 @@ import Testing
 }
 
 @Suite struct MatchPolicyTests {
-    @Test func thresholdIsInclusiveAndRequiresBothScores() {
+    @Test func thresholdIsInclusiveOnTheBetterOfCentroidAndTopK() {
         let p = MatchPolicy(threshold: 0.6)
         #expect(p.isMatch(MatchScore(centroid: 0.6, bestSample: 0.6)))
         #expect(p.isMatch(MatchScore(centroid: 0.8, bestSample: 0.7)))
-        #expect(!p.isMatch(MatchScore(centroid: 0.59, bestSample: 0.9)))
-        #expect(!p.isMatch(MatchScore(centroid: 0.9, bestSample: 0.59)))
+        // A single lucky sample isn't enough: top-3 mean or centroid must clear it.
+        #expect(!p.isMatch(MatchScore(centroid: 0.59, bestSample: 0.9, topK: 0.58)))
+        #expect(p.isMatch(MatchScore(centroid: 0.55, bestSample: 0.9, topK: 0.7)))
+        #expect(!p.isMatch(MatchScore(centroid: 0.5, bestSample: 0.5, topK: 0.5)))
+    }
+
+    @Test func topThreeMeanMatchesAPostureEnrolledAsSamples() throws {
+        // Enrolment: 6 samples in posture A, 6 in posture B (orthogonal-ish).
+        let a: [Float] = [1, 0, 0, 0], b: [Float] = [0, 1, 0, 0]
+        var samples: [[Float]] = []
+        for i in 0..<6 { samples.append([1, 0, 0.05 * Float(i), 0]); samples.append([0, 1, 0, 0.05 * Float(i)]) }
+        let template = try FaceTemplate(modelID: "m", samples: samples)
+        let sa = MatchScore.score(a, against: template)
+        let sb = MatchScore.score(b, against: template)
+        // The centroid sits between the postures (≈0.7); top-3 finds each posture.
+        #expect(sa.centroid < 0.75 && sb.centroid < 0.75)
+        #expect(sa.topK > 0.99 && sb.topK > 0.99)
+        #expect(sa.value == sa.topK)
+    }
+
+    @Test func adaptiveSamplesAreFIFOAndNeverMoveTheCentroid() throws {
+        let template = try FaceTemplate(modelID: "m", samples: [[1, 0, 0], [0.9, 0.1, 0]])
+        var t = template
+        for i in 0..<20 { t = t.adapting(with: [0, 1, Float(i)]) }
+        #expect(t.adaptiveSamples?.count == FaceTemplate.maximumAdaptiveSamples)
+        #expect(t.samples == template.samples)
+        #expect(t.centroid == template.centroid)
+        // Oldest dropped first.
+        #expect(abs((t.adaptiveSamples?.last?[2] ?? 0) - VectorMath.l2Normalized([0, 1, 19])[2]) < 1e-6)
+        // Adaptive samples take part in top-k.
+        let s = MatchScore.score([0, 1, 19], against: t)
+        #expect(s.bestSample > 0.99)
     }
 
     @Test func thresholdIsClamped() {

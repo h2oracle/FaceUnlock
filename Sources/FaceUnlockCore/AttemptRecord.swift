@@ -107,7 +107,7 @@ public struct AttemptDiagnostics: Equatable, Sendable {
         if s.faceCount > 0 { sawFace = true }
         if s.faceCount > 1 { sawMultipleFaces = true }
         if let score = s.score {
-            bestScore = max(bestScore ?? -1, score.centroid)
+            bestScore = max(bestScore ?? -1, score.value)
         }
         if s.frameMatched { anyMatch = true }
         if s.blinked { blinked = true }

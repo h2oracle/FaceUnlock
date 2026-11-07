@@ -84,6 +84,11 @@ final class UnlockCoordinator {
     /// Pose of the frames that produced the current pass; refines the
     /// learned baseline once the unlock is confirmed.
     private var pendingPassPose: PoseBaseline?
+    private var pendingPassEmbedding: [Float]?
+    private var pendingPassScore: Float?
+    /// Called after a confirmed face unlock with the median embedding of the
+    /// unlocking frames and their lowest score (for template adaptation).
+    var onConfirmedUnlock: (([Float]?, Float?) -> Void)?
     private var typingCancellation: TypingCancellation?
     private var lastIdle: TimeInterval = .infinity
     private var notReadyUntil: TimeInterval = 0
@@ -216,6 +221,9 @@ final class UnlockCoordinator {
                 diag(String(format: "baseline refined from unlock pose %.1f/%.1f", pose.yaw, pose.pitch))
             }
             pendingPassPose = nil
+            onConfirmedUnlock?(pendingPassEmbedding, pendingPassScore)
+            pendingPassEmbedding = nil
+            pendingPassScore = nil
             awaitingUnlockConfirmation = false
         } else if let processor {
             processor.flushDiagnostics()
@@ -588,6 +596,8 @@ final class UnlockCoordinator {
         guard id == scanID, let processor else { return }
         timing?.match = now
         pendingPassPose = template?.baselinePose == nil ? processor.passPose : nil
+        pendingPassEmbedding = processor.passEmbedding
+        pendingPassScore = processor.passScore
         processor.flushDiagnostics()
         stopScan()
         diag("scan ended: face matched with liveness")

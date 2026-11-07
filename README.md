@@ -54,8 +54,14 @@ live person, it types your login password into the lock screen for you.
    template and turned into a 128-number embedding by the **SFace**
    (MobileFaceNet) model, run with Core ML.
 3. **Match**: the embedding is compared, using cosine similarity, with the
-   averaged embedding from your enrolment and with the closest enrolment
-   sample. Both must reach the threshold on 3 consecutive frames.
+   averaged enrolment embedding and with the enrolment samples. The better
+   of the averaged score and the mean of the 3 closest samples must reach the
+   threshold on 3 consecutive frames. Background faces much smaller than
+   yours are ignored; a second face of similar size blocks unlocking.
+   After a strong, attentive, live unlock, the embedding of the unlocking
+   frames is added to a small set of adaptive samples (at most 15). Like
+   Face ID, this tracks gradual changes. The original enrolment samples are
+   never replaced.
 4. **Liveness**: evidence is only taken from frames that match you. Any frame
    that doesn't match resets it.
 5. **Attention**: like Face ID's "Require Attention", the last 5 matched
@@ -129,7 +135,7 @@ Spotlight or Finder. Each step unlocks once the earlier ones are done:
 3. **Login password**: entered once and checked with macOS's directory
    service. It is stored only in your login Keychain.
 4. **Enrol your face**: confirm with your password, then follow the on-screen
-   prompts (look straight, slightly left, right and up).
+   prompts (look straight, sit back, lean in, and look slightly left, right, up and down: about 30 samples).
 5. **Test recognition**: a live preview with your match score, eye openness,
    head movement and liveness status. The step is ticked after a real *PASS*.
 6. **Turn on**: enable face unlock (asks for your password), with *Launch at

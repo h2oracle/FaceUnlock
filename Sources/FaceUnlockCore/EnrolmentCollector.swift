@@ -9,19 +9,22 @@ public struct EnrolmentCollector: Sendable {
     }
 
     public static let steps: [Step] = [
-        Step(instruction: "Look straight at the camera", samples: 6),
-        Step(instruction: "Turn your head slightly left", samples: 4),
-        Step(instruction: "Turn your head slightly right", samples: 4),
-        Step(instruction: "Tilt your head slightly up", samples: 4),
+        Step(instruction: "Look straight at the screen", samples: 6),
+        Step(instruction: "Sit back a little", samples: 4),
+        Step(instruction: "Lean in a little", samples: 4),
+        Step(instruction: "Look slightly left", samples: 4),
+        Step(instruction: "Look slightly right", samples: 4),
+        Step(instruction: "Look slightly up", samples: 4),
+        Step(instruction: "Look slightly down", samples: 4),
     ]
 
     /// VNDetectFaceCaptureQualityRequest score below which frames are rejected.
     public var minimumQuality: Float = 0.35
     /// Minimum seconds between accepted frames, so samples aren't near-duplicates.
-    public var minimumInterval: TimeInterval = 0.2
+    public var minimumInterval: TimeInterval = 0.15
     /// Seconds after each new instruction before frames are taken, so the
     /// user has time to read it and move.
-    public var stepSettleTime: TimeInterval = 1.2
+    public var stepSettleTime: TimeInterval = 0.8
 
     public private(set) var embeddings: [[Float]] = []
     /// Head pose of each accepted sample (when known).

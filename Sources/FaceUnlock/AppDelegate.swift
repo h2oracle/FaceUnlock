@@ -80,6 +80,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.setupModel.verifiedAt = nil }
         }
+        coordinator.onConfirmedUnlock = { [weak self] embedding, score in
+            if let score { SetupStore.recentUnlockScores.append(score) }
+            if let embedding, let score { self?.adaptTemplate(with: embedding, score: score) }
+        }
         coordinator.onAttemptRecorded = { [weak self] record in
             SetupStore.lastAttempt = record
             self?.refreshSetup()
@@ -244,6 +248,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Settings.matchThreshold = record.threshold
         Settings.livenessMode = record.effectiveLivenessMode
         Settings.isEnabled = record.enabled == true
+    }
+
+    /// Face ID-style adaptation, the only template change allowed without
+    /// the password: right after a confirmed face unlock whose attentive,
+    /// live frames all scored at least threshold + 0.10, the median embedding
+    /// of those frames joins the adaptive samples (max 15, FIFO; enrolment
+    /// samples are never replaced). The template file and the Keychain
+    /// record are updated together; if the record can't be written, the
+    /// file is rolled back.
+    private func adaptTemplate(with embedding: [Float], score: Float) {
+        guard let current = template, let previousDigest = templateDigest, var record = integrity,
+              integrityProblem == nil, templateMatchesRecord,
+              score >= verifiedPolicy.threshold + 0.10 else { return }
+        let updated = current.adapting(with: embedding)
+        do {
+            let digest = try store.save(updated)
+            record.templateSHA256 = digest
+            do {
+                try PasswordVault.saveIntegrity(record)
+            } catch {
+                // Roll back so file and record stay consistent.
+                if (try? store.save(current)) != previousDigest {
+                    log.error("Template rollback produced a different digest; unlock stays blocked until re-enrolment")
+                }
+                throw error
+            }
+            let testWasPassed = SetupStore.testPassedForDigest == previousDigest
+            integrity = record
+            templateDigest = digest
+            template = updated
+            coordinator.template = updated
+            if testWasPassed { SetupStore.testPassedForDigest = digest }
+            Diagnostics.write(String(format: "template adapted: %d adaptive samples (unlock score %.3f)",
+                                     updated.adaptiveSamples?.count ?? 0, score))
+        } catch {
+            Diagnostics.write("template adaptation skipped: \(error)")
+        }
     }
 
     /// Turning face unlock off always reaches the trusted record (whatever
@@ -825,6 +866,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             details[.password] = "Your Mac login password. It's checked now and stored only in your Keychain."
         }
 
+        let recent = SetupStore.recentUnlockScores
+        let typicalUnlock = recent.count >= 3 ? recent.sorted()[recent.count / 2] : nil
         if let modelError {
             conditions[.enrol] = .problem
             details[.enrol] = "The face model failed to load: \(modelError)"
@@ -836,7 +879,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             details[.enrol] = problem
         } else {
             conditions[.enrol] = .done
-            details[.enrol] = "Enrolled. Re-enrol if you change your look or it struggles in some lighting."
+            if let typicalUnlock, typicalUnlock < verifiedPolicy.threshold + 0.08 {
+                details[.enrol] = String(format: "Enrolled, but recent unlock scores are low (~%.2f). Re-enrolling (sitting how you usually sit) should make it faster.", typicalUnlock)
+            } else {
+                details[.enrol] = "Enrolled. Re-enrol if you change your look or it struggles in some lighting."
+            }
         }
 
         m.livenessMode = Settings.livenessMode

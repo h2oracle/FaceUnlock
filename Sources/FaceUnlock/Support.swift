@@ -192,6 +192,14 @@ enum SetupStore {
         set { defaults.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: learnedBaselineKey) }
     }
 
+    private static let unlockScoresKey = "recentUnlockScores"
+
+    /// Scores of the last few face unlocks (for the re-enrol suggestion).
+    static var recentUnlockScores: [Float] {
+        get { (defaults.array(forKey: unlockScoresKey) as? [Double] ?? []).map(Float.init) }
+        set { defaults.set(Array(newValue.suffix(5)).map(Double.init), forKey: unlockScoresKey) }
+    }
+
     static func refineLearnedBaseline(with pose: PoseBaseline) {
         learnedBaselinePose = PoseBaseline.blended(learnedBaselinePose, with: pose)
     }
