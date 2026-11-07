@@ -212,6 +212,9 @@ final class UnlockCoordinator {
     }
 
     private func cancelTyping() {
+        // If Return was already posted, the password went in: keep that fact
+        // so it's confirmed (or treated as rejected) and never retyped.
+        if typingCancellation?.isSubmitted == true { awaitingUnlockConfirmation = true }
         typingCancellation?.cancel()
         typingCancellation = nil
         isTyping = false
@@ -403,7 +406,7 @@ final class UnlockCoordinator {
         let t = now
         let idle = SessionState.secondsSinceUserInput
         timing = Timing(trigger: trigger, start: t, inputAt: idle < 5 ? t - idle : nil)
-        monitor = ScanMonitor(start: t)
+        monitor = ScanMonitor(start: t, config: ScanMonitor.Config(liveness: liveness))
         diag(String(format: "scan %d started: trigger=%@ mode=%@ sinceLock=%.1fs idle=%.1fs liveness=%@ threshold=%.2f",
                     id, trigger.rawValue, gate.mode.rawValue, t - lockStartedAt, idle, liveness.rawValue, policy.threshold))
 
@@ -413,7 +416,10 @@ final class UnlockCoordinator {
                 let faces = readout.snapshot.faceCount
                 let matched = readout.snapshot.frameMatched
                 let live = readout.snapshot.livenessSatisfied
-                Task { @MainActor in self?.frameObserved(id: id, faceCount: faces, matched: matched, live: live) }
+                let liveProgress = readout.snapshot.livenessProgress
+                Task { @MainActor in
+                    self?.frameObserved(id: id, faceCount: faces, matched: matched, live: live, livenessProgress: liveProgress)
+                }
             },
             onDiagnostics: { line in Diagnostics.write("  \(line)") }
         ) { [weak self] in
@@ -468,12 +474,13 @@ final class UnlockCoordinator {
         if sawFace { record(outcome) }
     }
 
-    private func frameObserved(id: Int, faceCount: Int, matched: Bool, live: Bool) {
+    private func frameObserved(id: Int, faceCount: Int, matched: Bool, live: Bool, livenessProgress: Double) {
         guard id == scanID, processor != nil, var monitor else { return }
         let t = now
         if timing?.firstFrame == nil { timing?.firstFrame = t }
         if faceCount > 0, timing?.firstFace == nil { timing?.firstFace = t }
-        let event = monitor.observe(time: t, faceCount: faceCount, matched: matched, live: live)
+        let event = monitor.observe(time: t, faceCount: faceCount, matched: matched, live: live,
+                                    livenessProgress: livenessProgress)
         self.monitor = monitor
         if faceCount > 0 {
             lockout.recordFaceTime(monitor.lastFrameDuration)
@@ -580,7 +587,11 @@ final class UnlockCoordinator {
     }
 
     private func typingFinished(id: Int, failure: AttemptOutcome?) {
-        guard id == scanID, isTyping else { return }
+        guard id == scanID else { return }
+        // Recorded before the isTyping check: sleep may have cancelled typing
+        // after the password was already submitted.
+        if failure == nil && inLockSession { awaitingUnlockConfirmation = true }
+        guard isTyping || awaitingUnlockConfirmation else { return }
         timing?.typingDone = now
         if let failure {
             isTyping = false

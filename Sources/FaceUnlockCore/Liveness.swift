@@ -25,7 +25,7 @@ public enum LivenessMode: String, Codable, CaseIterable, Sendable {
     public var securityNote: String {
         switch self {
         case .naturalMovement:
-            return "No blink needed. Rejects flat photos (still or moved) by checking 3D parallax as your head turns slightly; a video or a 3D mask may pass."
+            return "No blink needed. Designed to reject flat photos; validated on simulated data only, so test with a printed photo in the Test step. Curved or bent prints, videos and masks may pass."
         case .blinkAndMovement:
             return "Strongest webcam check: stops photos, including moved ones; a video of you can still pass."
         case .off:

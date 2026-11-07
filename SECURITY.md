@@ -24,11 +24,15 @@ has physical access to your Mac.
 - Someone else's face unlocking your Mac (face matching with a strict
   threshold, consecutive matching frames, one face in view only).
 - Photos on paper or a screen, held still or moved around (natural
-  movement: 3D parallax as the head turns; or blink + movement).
+  movement: 3D parallax as the head turns; or blink + movement). Natural
+  movement is designed to reject flat photos but has been validated on
+  simulated data only. Test it with a printed photo in the Test step.
 - Repeated attempts at the lock screen. Failed looks are counted per display
   wake and per lock session, and covering the lens or adding a second face
   doesn't reset the count. A matching face that never passes liveness also
-  counts. Face time is capped at 2 minutes per lock session. It stops after
+  counts (after 6 s for natural movement, 8 s for blink + movement, while
+  the evidence isn't improving). Face time is capped at 2 minutes per lock
+  session. It stops after
   one typed password that didn't work.
 - Typing the password anywhere other than the lock screen (it re-checks
   before every key that this user's session is locked, on the console, and
@@ -49,10 +53,10 @@ has physical access to your Mac.
   them without a prompt, and fails closed.
 
 **Out of scope / known limitations:**
-- A webcam has no depth or infrared sensor. A **video** of you, a good 3D
-  mask, or a print bent into a convincing 3D shape can defeat the liveness
-  checks. The natural-movement thresholds were tuned on simulated faces,
-  not a large real-world dataset.
+- A webcam has no depth or infrared sensor. A **video** of you, a mask, or
+  a curved or bent print can defeat the liveness checks. The
+  natural-movement thresholds were tuned on simulated faces, not on real
+  attack data.
 - The login password is stored in your login Keychain. Malware running as
   you with Keychain access, or with Accessibility permission, can misuse it.
 - It only works for the screen lock of a session that is already logged in.

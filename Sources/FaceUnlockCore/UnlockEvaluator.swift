@@ -78,6 +78,8 @@ public struct UnlockEvaluator: Sendable {
         public var livenessSatisfied: Bool = false
         /// 0…1 overall evidence (for the on-screen ring).
         public var progress: Double = 0
+        /// 0…1 progress of the liveness check alone.
+        public var livenessProgress: Double = 0
     }
 
     public let policy: MatchPolicy
@@ -199,7 +201,8 @@ public struct UnlockEvaluator: Sendable {
             motionParallax: motion.parallax,
             motionSeconds: motion.duration,
             livenessSatisfied: live,
-            progress: unlock ? 1 : (matchProgress + liveProgress) / 2
+            progress: unlock ? 1 : (matchProgress + liveProgress) / 2,
+            livenessProgress: liveProgress
         )
     }
 }

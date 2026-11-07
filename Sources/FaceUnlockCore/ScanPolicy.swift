@@ -67,8 +67,12 @@ public struct ScanGate: Equatable, Sendable {
 ///   frames) that lasts at least `briefAppearanceFrames` frames and ends
 ///   without ever matching is one failed look, so showing a face in short
 ///   bursts doesn't escape the bucket.
-/// - **Not live**: a face that matches but never passes liveness for 3 s in
-///   total (e.g. a photo of the owner) is one failed look.
+/// - **Not live**: a face that matches but doesn't pass liveness for 6 s
+///   (natural movement) or 8 s (blink + movement) in total, e.g. a photo of
+///   the owner, is one failed look. Time only accrues while the liveness
+///   evidence isn't improving: whenever it reaches a new high, the bucket
+///   drains instead, so a still owner who then moves a little isn't
+///   penalised. A photo's evidence plateaus, so it's still bounded.
 ///
 /// It also says whether the HUD should be visible and when to pause because
 /// nobody is there.
@@ -76,7 +80,10 @@ public struct ScanMonitor: Equatable, Sendable {
     public struct Config: Equatable, Sendable {
         public var failedLookDuration: TimeInterval = 2
         public var briefAppearanceFrames = 6
-        public var notLiveDuration: TimeInterval = 3
+        public var notLiveDuration: TimeInterval = 6
+        /// Liveness progress must beat its previous best by this much to count
+        /// as "improving".
+        public var progressStep = 0.01
         /// Gaps between frames longer than this only count this much.
         public var maximumFrameGap: TimeInterval = 0.2
         /// Hide the HUD after this long without any face.
@@ -85,6 +92,15 @@ public struct ScanMonitor: Equatable, Sendable {
         public var facelessPause: TimeInterval = 60
 
         public init() {}
+
+        /// Per-mode defaults.
+        public init(liveness: LivenessMode) {
+            switch liveness {
+            case .naturalMovement: notLiveDuration = 6
+            case .blinkAndMovement: notLiveDuration = 8
+            case .off: notLiveDuration = .infinity
+            }
+        }
     }
 
     public enum Event: String, Equatable, Sendable {
@@ -98,6 +114,7 @@ public struct ScanMonitor: Equatable, Sendable {
     private var lastFrameAt: TimeInterval?
     private var nonMatchBucket: TimeInterval = 0
     private var notLiveTime: TimeInterval = 0
+    private var bestLivenessProgress = 0.0
     private var appearanceFrames = 0
     private var appearanceMatched = false
     private var appearanceCounted = false
@@ -111,7 +128,8 @@ public struct ScanMonitor: Equatable, Sendable {
     public private(set) var lastFrameDuration: TimeInterval = 0
 
     @discardableResult
-    public mutating func observe(time: TimeInterval, faceCount: Int, matched: Bool, live: Bool = false) -> Event? {
+    public mutating func observe(time: TimeInterval, faceCount: Int, matched: Bool, live: Bool = false,
+                                 livenessProgress: Double = 0) -> Event? {
         let dt = lastFrameAt.map { min(max(0, time - $0), config.maximumFrameGap) } ?? 0
         lastFrameAt = time
         lastFrameDuration = dt
@@ -126,7 +144,13 @@ public struct ScanMonitor: Equatable, Sendable {
             appearanceMatched = true
             nonMatchBucket = max(0, nonMatchBucket - dt)
             if !live {
-                notLiveTime += dt
+                if livenessProgress >= bestLivenessProgress + config.progressStep {
+                    // Evidence is improving: give time back.
+                    bestLivenessProgress = livenessProgress
+                    notLiveTime = max(0, notLiveTime - dt)
+                } else {
+                    notLiveTime += dt
+                }
                 if notLiveTime >= config.notLiveDuration {
                     notLiveTime = 0
                     return .notLive

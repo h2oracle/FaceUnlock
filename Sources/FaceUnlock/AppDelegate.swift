@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var templateDigest: String?
     /// Integrity record from the Keychain (nil if missing or unreadable).
     private var integrity: IntegrityRecord?
+    /// Set when reading the record failed for a reason other than "not
+    /// found" (then nothing may be written until it's resolved).
+    private var integrityReadError: String?
     private var integrityLoaded = false
     /// False if the stored password exists but can't be read without a
     /// Keychain prompt (e.g. after the app's signing identity changed).
@@ -113,13 +116,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var integrityProblem: String? {
         guard template != nil else { return "Not enrolled" }
         guard integrityLoaded else { return "Checking Keychain…" }
+        if let integrityReadError { return "Couldn't read the Keychain record (\(integrityReadError))" }
         guard let integrity else { return "Template changed – re-enrol" }
         switch integrity.problem(templateSHA256: templateDigest, threshold: Settings.matchThreshold,
                                  livenessMode: Settings.livenessMode) {
         case nil: return nil
         case .templateChanged: return "Template changed – re-enrol"
-        case .thresholdChanged: return "Threshold changed outside FaceUnlock – choose Match strictness again"
-        case .livenessChanged: return "Liveness setting changed outside FaceUnlock – choose it again"
+        case .thresholdChanged: return "Threshold changed outside FaceUnlock – choose Match strictness again (asks for your password)"
+        case .livenessChanged: return "Liveness changed outside FaceUnlock – choose Liveness again (asks for your password)"
         }
     }
 
@@ -137,8 +141,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// without UI, off the main thread (each read has its own timeout).
     private func reloadKeychainState() {
         Task { @MainActor [weak self] in
-            let (record, readable) = await Task.detached(priority: .utility) { () -> (IntegrityRecord?, Bool) in
-                let record = try? PasswordVault.readIntegrity()
+            let (record, readError, readable) = await Task.detached(priority: .utility) { () -> (IntegrityRecord?, String?, Bool) in
+                var record: IntegrityRecord?
+                var readError: String?
+                do {
+                    record = try PasswordVault.readIntegrity()
+                } catch PasswordVault.VaultError.keychain(let status) where status == errSecItemNotFound {
+                    record = nil // first set-up
+                } catch {
+                    readError = String(describing: error)
+                }
                 var readable = true
                 if PasswordVault.passwordExists() {
                     do {
@@ -148,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         readable = false
                     }
                 }
-                return (record, readable)
+                return (record, readError, readable)
             }.value
             do {
                 guard let self else { return }
@@ -166,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // password-confirmed) instead of silently weakening the check.
                 self.setupModel.livenessProposal = (record != nil && record?.livenessMode == nil) ? .naturalMovement : nil
                 self.integrity = record
+                self.integrityReadError = readError
                 self.integrityLoaded = true
                 self.passwordReadable = readable
                 self.updateIcon()
@@ -188,47 +201,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     enum IntegrityError: Error, CustomStringConvertible {
-        case notVerified
+        case noTrustedRecord
+        case templateMismatch
+        case settingsMismatch(String)
+        case unreadable(String)
+
         var description: String {
-            "The enrolled face or settings don't match the Keychain record. Re-enrol your face first."
+            switch self {
+            case .noTrustedRecord: return "There's no Keychain record yet. Enrol your face first."
+            case .templateMismatch: return "The enrolled face doesn't match the Keychain record. Re-enrol your face first."
+            case .settingsMismatch(let problem): return "\(problem). Fix that first."
+            case .unreadable(let detail): return "The Keychain record couldn't be read (\(detail)). Nothing was changed."
+            }
         }
     }
 
-    /// Changes one or more fields of the *verified* Keychain record (never
-    /// re-blessing values from UserDefaults or the template file) and saves
-    /// it. Refuses while anything doesn't match the record; only enrolment
-    /// may write a new template hash (`saveIntegrityAfterEnrolment`).
-    private func updateIntegrity(_ change: (inout IntegrityRecord) -> Void) throws {
-        guard var record = integrity, integrityProblem == nil else { throw IntegrityError.notVerified }
+    /// The trusted record exists and vouches for the template file on disk.
+    private var templateMatchesRecord: Bool {
+        guard let integrity, let templateDigest else { return false }
+        return integrity.templateSHA256 == templateDigest
+    }
+
+    /// Changes fields of the *trusted* Keychain record (never re-blessing
+    /// values from UserDefaults or the template file) and saves it, then
+    /// resets the preferences to what the record says.
+    ///
+    /// - `allowSettingsRepair`: true for an explicit, password-confirmed choice
+    ///   of threshold or liveness. It's allowed when only those preferences were
+    ///   changed outside the app, as long as the template still matches.
+    ///   Otherwise everything must match.
+    /// Only enrolment writes a new template hash (`saveIntegrityAfterEnrolment`).
+    private func updateIntegrity(allowSettingsRepair: Bool = false, _ change: (inout IntegrityRecord) -> Void) throws {
+        if let integrityReadError { throw IntegrityError.unreadable(integrityReadError) }
+        guard var record = integrity else { throw IntegrityError.noTrustedRecord }
+        guard templateMatchesRecord else { throw IntegrityError.templateMismatch }
+        if !allowSettingsRepair, let problem = integrityProblem { throw IntegrityError.settingsMismatch(problem) }
         change(&record)
         try PasswordVault.saveIntegrity(record)
         integrity = record
         integrityLoaded = true
-        // Keep the preferences in step with what the record now vouches for.
         Settings.matchThreshold = record.threshold
         Settings.livenessMode = record.effectiveLivenessMode
         Settings.isEnabled = record.enabled == true
     }
 
-    /// Enrolment is the only place a new template hash is written. Other
-    /// fields carry over from the existing Keychain record if there is one
-    /// (the record is trusted even when the template file isn't); a first
-    /// enrolment uses the current settings, with face unlock off.
-    private func saveIntegrityAfterEnrolment(templateSHA256: String) throws {
+    /// Turning face unlock off always reaches the trusted record (whatever
+    /// else is wrong), changing only `enabled`. The preference goes off
+    /// even if the Keychain write fails.
+    private func disableFaceUnlock() {
+        Settings.isEnabled = false
+        if var record = integrity, record.enabled != false {
+            record.enabled = false
+            do {
+                try PasswordVault.saveIntegrity(record)
+                integrity = record
+            } catch {
+                alert("Face unlock is off", "It's turned off, but the Keychain record couldn't be updated: \(error)")
+            }
+        }
+        updateIcon()
+        refreshSetup()
+    }
+
+    /// Enrolment is the only place a new template hash is written.
+    /// - Existing trusted record: threshold and liveness carry over. It stays
+    ///   enabled only if it was effectively enabled before (`keepEnabled`).
+    /// - No record ("not found"): defaults (`LivenessMode.default`,
+    ///   `MatchPolicy.defaultThreshold`), off, never values from UserDefaults.
+    /// - Unreadable record: refuses.
+    /// It never turns face unlock on.
+    private func saveIntegrityAfterEnrolment(templateSHA256: String, keepEnabled: Bool) throws {
+        if let integrityReadError { throw IntegrityError.unreadable(integrityReadError) }
         let record: IntegrityRecord
         if let old = integrity {
             record = IntegrityRecord(templateSHA256: templateSHA256, threshold: old.threshold,
-                                     livenessMode: old.effectiveLivenessMode, enabled: old.enabled == true)
+                                     livenessMode: old.effectiveLivenessMode,
+                                     enabled: keepEnabled && old.enabled == true)
         } else {
-            record = IntegrityRecord(templateSHA256: templateSHA256, threshold: Settings.matchThreshold,
-                                     livenessMode: Settings.livenessMode, enabled: false)
+            record = IntegrityRecord(templateSHA256: templateSHA256, threshold: MatchPolicy.defaultThreshold,
+                                     livenessMode: .default, enabled: false)
         }
         try PasswordVault.saveIntegrity(record)
         integrity = record
         integrityLoaded = true
         Settings.matchThreshold = record.threshold
         Settings.livenessMode = record.effectiveLivenessMode
-        Settings.isEnabled = record.enabled == true
+        if record.enabled != true { Settings.isEnabled = false }
     }
 
     // MARK: - Menu
@@ -412,12 +470,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func toggleEnabled() {
-        if isEffectivelyEnabled || Settings.isEnabled {
+        if isEffectivelyEnabled {
             // Turning it off never needs a password.
-            Settings.isEnabled = false
-            try? updateIntegrity { $0.enabled = false }
-            updateIcon()
-            refreshSetup()
+            disableFaceUnlock()
             return
         }
         let problems = readyProblems
@@ -446,12 +501,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Password-gated, and recorded in the Keychain integrity item.
     private func setLiveness(_ mode: LivenessMode) {
-        guard mode != Settings.livenessMode || integrityProblem != nil else { return }
-        requireLoginPassword("Enter your Mac login password to change the liveness check to “\(mode.title)”.",
+        requireLoginPassword("Enter your Mac login password to set the liveness check to “\(mode.title)”.",
                              allowReuse: mode != .off) { [weak self] in
             guard let self else { return }
             do {
-                try self.updateIntegrity { $0.livenessMode = mode }
+                try self.updateIntegrity(allowSettingsRepair: true) { $0.livenessMode = mode }
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
                 return
@@ -488,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                              allowReuse: true) { [weak self] in
             guard let self else { return }
             do {
-                try self.updateIntegrity { $0.threshold = MatchPolicy(threshold: value).threshold }
+                try self.updateIntegrity(allowSettingsRepair: true) { $0.threshold = MatchPolicy(threshold: value).threshold }
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
                 return
@@ -505,7 +559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         requireLoginPassword("Enter your Mac login password to keep the Blink + movement check.", allowReuse: true) { [weak self] in
             guard let self else { return }
             do {
-                try self.updateIntegrity { $0.livenessMode = .blinkAndMovement }
+                try self.updateIntegrity(allowSettingsRepair: true) { $0.livenessMode = .blinkAndMovement }
                 self.setupModel.livenessProposal = nil
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
@@ -703,8 +757,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             startTest: { [weak self] in self?.testRecognition() },
             stopTest: { [weak self] in self?.stopTest() },
             setEnabled: { [weak self] on in
-                guard let self, on != self.isEffectivelyEnabled else { return }
-                self.toggleEnabled()
+                guard let self else { return }
+                if !on {
+                    self.disableFaceUnlock()
+                } else if !self.isEffectivelyEnabled {
+                    self.toggleEnabled()
+                }
             },
             setLaunchAtLogin: { [weak self] on in self?.setLaunchAtLogin(on) },
             setLiveness: { [weak self] mode in self?.setLiveness(mode) },
@@ -872,6 +930,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func enrol() {
         showSetup()
         guard let analyzer, !cameraBusy else { return }
+        guard integrityLoaded else { alert("Please wait", "FaceUnlock is still reading its Keychain record."); return }
+        if let integrityReadError {
+            alert("Can't enrol right now", "The Keychain record couldn't be read (\(integrityReadError)). Unlock your login keychain or restart FaceUnlock, then try again.")
+            return
+        }
         let reason = template == nil
             ? "Enter your Mac login password to enrol your face."
             : "Enter your Mac login password to replace the enrolled face."
@@ -935,11 +998,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             let raw = try FaceTemplate(modelID: FaceEmbedder.modelID, samples: embeddings, cameraID: cameraID)
             let cleaned = try raw.removingOutliers(minimumSimilarity: 0.5, minimumKept: 12)
+            if let integrityReadError { throw IntegrityError.unreadable(integrityReadError) }
+            let keepEnabled = isEffectivelyEnabled
             let digest = try store.save(cleaned)
             templateDigest = digest
             template = cleaned
             coordinator.template = cleaned
-            try saveIntegrityAfterEnrolment(templateSHA256: digest)
+            try saveIntegrityAfterEnrolment(templateSHA256: digest, keepEnabled: keepEnabled)
             model.instruction = "Enrolled ✓"
             model.detail = String(format: "%d samples kept, consistency %.2f. Now test recognition below.",
                                   cleaned.samples.count, cleaned.consistency)

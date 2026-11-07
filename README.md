@@ -143,11 +143,11 @@ window.
     your head must turn a few degrees (≥ 3° between the ends of the
     movement), and the landmarks must shift the way only a 3D face does
     (parallax). A picture on a flat surface moves like a single plane
-    however it's tilted or waved, so photos on paper or a phone fail. A still
-    real head waits until you move slightly; with normal movement it passes
-    in about 0.5–1.5 s. A video of you, a 3D mask or a curved print may
-    still pass. The thresholds were tuned on simulated faces with realistic
-    landmark noise, not on a large real-world dataset.
+    however it's tilted or waved, so this check is **designed to reject flat
+    photos**. It has been **validated on simulated data only**. Test it
+    yourself by holding up a printed photo in the Test step. Curved or bent
+    prints, videos and masks may pass. A still real head waits until you
+    move slightly; with normal movement it passes in about 0.5–1.5 s.
   - *Blink + movement*: a natural blink plus slight head movement. This is the
     strongest webcam check, but a video of you can still pass.
   - *Off*: face match only. A photo of you can unlock. Not recommended.
@@ -168,8 +168,9 @@ window.
 - a face that doesn't match for 2 s in total. Covering the camera or adding
   a second face doesn't reset the count;
 - a brief appearance (6+ frames) of a face that never matched;
-- a face that matches but doesn't pass the liveness check for 3 s, such as
-  a photo of you.
+- a face that matches but doesn't pass the liveness check for 6 s (natural
+  movement) or 8 s (blink + movement) while the evidence stops improving,
+  such as a photo of you.
 
 Frames with no face never count. After 3 failed looks, scanning stops until
 the display sleeps and wakes again. It stops until you unlock manually after
@@ -182,9 +183,11 @@ sleeps before that is confirmed, it is treated as not unlocked.
 See the warning at the top and [SECURITY.md](SECURITY.md) for the threat
 model. In short:
 
-- It resists another person's face and flat photos (still or moved). It
-  does **not** reliably resist a video, a mask or a skilled attacker with
-  physical access.
+- It resists another person's face. Natural movement is designed to reject
+  flat photos (still or moved), but has been validated on simulated data
+  only. Test it with a printed photo. It does **not** reliably resist
+  curved or bent prints, a video, a mask or a skilled attacker with physical
+  access.
 - Matching is strict by default, and every typed key is preceded by a check
   that your own session's lock screen is in front.
 - The Keychain keeps an integrity record: a SHA-256 of the face template,

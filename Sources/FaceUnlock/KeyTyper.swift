@@ -9,9 +9,16 @@ import IOKit.pwr_mgt
 final class TypingCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
+    private var submitted = false
 
     func cancel() { lock.withLock { cancelled = true } }
     var isCancelled: Bool { lock.withLock { cancelled } }
+
+    /// Set by the typing thread the moment Return has been posted, so the
+    /// coordinator knows a password went in even if it's cancelled before
+    /// the typing task reports back.
+    func markSubmitted() { lock.withLock { submitted = true } }
+    var isSubmitted: Bool { lock.withLock { submitted } }
 }
 
 /// Is the macOS lock screen what's actually in front?
@@ -127,6 +134,7 @@ enum KeyTyper {
         }
         try ensureSafe(cancellation)
         try postKey(returnKey, flags: [], source: source)
+        cancellation.markSubmitted()
     }
 
     /// Removes anything already typed (e.g. a stray key press that woke the
