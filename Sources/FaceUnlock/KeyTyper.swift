@@ -49,6 +49,8 @@ enum LockScreenGuard {
             let covered = bounds.intersection(display)
             guard alpha > 0, !covered.isNull, covered.width * covered.height >= minimumArea else { continue }
             let pid = (window[kCGWindowOwnerPID as String] as? Int32) ?? -1
+            // Our own lock-screen indicator never counts.
+            if pid == getpid() { continue }
             let owner = (window[kCGWindowOwnerName as String] as? String) ?? "unknown"
             return executablePath(of: pid) == loginWindowPath ? .lockScreenInFront : .otherOwner(owner)
         }

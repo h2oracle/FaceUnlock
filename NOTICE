@@ -53,6 +53,12 @@ CGSessionCopyCurrentDictionary, and aligning faces to the standard 5-point
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
 
+Showing the lock-screen indicator (Sources/FaceUnlock/LockOverlay.swift,
+LockScreenSpace) uses the private SkyLight "space at lock-screen level"
+technique that Glance documents in its NotchSkyLight.swift, which Glance in
+turn adapted from Lakr233/SkyLightWindow (https://github.com/Lakr233/SkyLightWindow,
+MIT License). FaceUnlock's implementation is written independently.
+
 Glance itself uses InsightFace's w600k_mbf ArcFace weights. FaceUnlock does
 NOT use them: InsightFace's pretrained models are licensed for non-commercial
 research use only.

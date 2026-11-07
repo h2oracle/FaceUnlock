@@ -72,9 +72,10 @@ The individual steps, also available from the menu:
    Only the Mac's built-in camera is used (not iPhone/Continuity, external or
    virtual cameras), and unlock uses the same camera as enrolment.
 3. **Test recognition…** – live preview with match score, consecutive matches,
-   blink and head-movement status. Blink once and move your head slightly; it
-   should say *PASS – would unlock*. Hold up a photo of yourself to see it fail.
-   Nothing is typed from this window.
+   eye openness, blink state, head-pose range and natural-movement numbers.
+   Look at the camera (blink too, in *Blink + movement* mode); it should say
+   *PASS – would unlock*. Hold up a photo of yourself to see it fail. Nothing
+   is typed from this window.
 4. **Enabled** – tick it (asks for your login password). Optionally tick
    **Launch at login**.
 
@@ -102,13 +103,36 @@ stops until you choose a strictness in the menu again.
 - **Recognition**: Vision face detection + 76-point landmarks → 5-point
   alignment to a 112×112 crop → **SFace** (MobileFaceNet) Core ML model →
   128-d embedding → cosine similarity against the enrolled template.
-- **Liveness**: within the attempt you must **blink** (eyes open → both closed
-  briefly → open, measured from the landmark eye contours, with checks that
-  reject a tilted photo) **and** move your head slightly (yaw or pitch varies by
-  ≥ 2.5°). Liveness evidence only counts from frames that match you, and at
-  least 3 matching frames are needed after the blink. Any frame without a
-  matching single face (no face, two faces, someone else, or a face that
+- **Liveness** (menu → *Liveness*, or the Test step; changing it asks for your
+  login password and is recorded in the Keychain integrity item):
+  - **Natural movement** (default for new set-ups): no blink needed. Over at
+    least 1 s of matching frames the head must move slightly in 3D (≥ 0.8°
+    yaw or pitch) and the eye region must show small frame-to-frame changes
+    (≥ 2.5 %). A person sitting normally should pass in about 1–2 s. These
+    thresholds are estimates. Check them against a photo with *Test
+    recognition*.
+  - **Blink + movement**: a natural blink (open → both closed briefly → open,
+    with checks that reject a tilted photo) plus slight head movement
+    (≥ 2.5°), and 3 matching frames after the blink.
+  - **Off**: face match only. A photo of you can unlock.
+  Liveness evidence only counts from frames that match you. Any frame without
+  a matching single face (no face, two faces, someone else, or a face that
   couldn't be read) resets all evidence.
+- **Lock-screen indicator**: while an attempt runs, a small Face ID-style ring
+  is shown above the password field. It fills up as evidence builds, shows a
+  green tick on a match, and briefly says "Face not recognised" on failure.
+  To appear above the lock screen it uses a private macOS window-server
+  feature. If that doesn't work, the ring simply isn't shown and unlocking is
+  unaffected. The camera light is always the fallback indicator.
+- **Diagnostics**: every lock session and attempt is logged to
+  `~/Library/Application Support/FaceUnlock/diagnostics.log` (0600, rotated at
+  ~1 MB). The log has the attempt start (trigger, time since lock, idle time),
+  a summary every 0.5 s (frames, faces, best/latest score vs threshold,
+  match run, eye openness, blink state, pose and movement numbers, and
+  evidence resets with their reasons), and the reason each attempt ended. It
+  also records why an attempt didn't start. It never contains the password,
+  embeddings or images. Key lines also go to the unified log
+  (`log show --predicate 'subsystem == "uk.co.sid.faceunlock"'`).
 - **Unlock**: on success it wakes the display, clears the password field and
   types the password one Unicode character at a time (so non-US layouts
   work), then Return. Before the clear step, before each character and
@@ -124,9 +148,11 @@ stops until you choose a strictness in the menu again.
 
 ## Security limitations
 
-- **A webcam is not Face ID.** There is no depth or IR sensor. The blink and
-  head-movement checks stop a printed photo or a still image on a phone, but a
-  **video** of you (or a good mask) can pass. Someone with such a video and
+- **A webcam is not Face ID.** There is no depth or IR sensor. *Blink +
+  movement* stops a printed photo or a still image on a phone. *Natural
+  movement* is designed to stop a still photo, but it is weaker against a
+  photo that is moved around. In either mode a **video** of you (or a good
+  mask) can pass. Someone with such a video and
   physical access to your Mac can unlock it.
 - **Your login password is stored in your Keychain** and typed by the app.
   Anything that can read that Keychain item, or that runs as you with
@@ -154,7 +180,7 @@ stops until you choose a strictness in the menu again.
 
 ```bash
 swift build        # debug build
-swift test         # unit tests (matching, blink state machine, head pose, lockout, model parity)
+swift test         # unit tests (matching, liveness modes, lockout, setup gating, diagnostics, model parity)
 ./build.sh         # release .app in build/
 ```
 

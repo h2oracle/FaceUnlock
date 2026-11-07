@@ -129,7 +129,7 @@ struct TestView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
-                Text("Blink once and move your head a little. Nothing is typed here.")
+                Text("Look at the camera as you normally would. Nothing is typed here.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Reset", action: reset)
@@ -145,14 +145,21 @@ extension TestModel {
         var lines: [String] = []
         lines.append("Faces in frame:     \(s.faceCount)\(s.faceCount > 1 ? "  (only one allowed)" : "")")
         if let score = s.score {
-            lines.append(String(format: "Match (avg / best): %.3f / %.3f   threshold %.2f", score.centroid, score.bestSample, threshold))
+            let verdict = s.frameMatched ? "match" : "no match"
+            lines.append(String(format: "Match (avg / best): %.3f / %.3f  vs %.2f  %@", score.centroid, score.bestSample, threshold, verdict))
         } else {
             lines.append("Match:              –")
         }
         lines.append("Consecutive match:  \(s.consecutiveMatches)/\(s.requiredConsecutive)\(s.consecutiveMatches >= s.requiredConsecutive ? "  ✓" : "")")
-        let eyes = r.eyeOpenness.map { String(format: "  (L %.3f R %.3f)", $0.left, $0.right) } ?? ""
-        lines.append("Blink:              \(s.blinked ? "seen ✓" : Self.describe(s.blinkState))\(eyes)")
-        lines.append(String(format: "Head movement:      yaw %.1f° pitch %.1f°%@", s.yawRange, s.pitchRange, s.poseVaried ? "  ✓" : ""))
+        let eyes = r.eyeOpenness.map { String(format: "L %.3f R %.3f", $0.left, $0.right) } ?? "–"
+        let ratio = s.eyeRatio.map { String(format: "  (%.0f%% of open)", $0 * 100) } ?? ""
+        lines.append("Eye openness:       \(eyes)\(ratio)")
+        let blinkNote = s.livenessMode == .blinkAndMovement ? "" : "  (not required)"
+        lines.append("Blink:              \(s.blinked ? "seen ✓" : Self.describe(s.blinkState))\(blinkNote)")
+        lines.append(String(format: "Head pose range:    yaw %.1f° pitch %.1f°", s.yawRange, s.pitchRange))
+        lines.append(String(format: "Natural movement:   %.1fs, pose %.1f°, eye jitter %.1f%%",
+                            s.motionSeconds, s.motionPoseRange, s.motionEyeJitter * 100))
+        lines.append("Liveness (\(s.livenessMode.title)): \(s.livenessSatisfied ? "✓" : "waiting")")
         self.lines = lines
         if s.shouldUnlock { passed = true }
     }

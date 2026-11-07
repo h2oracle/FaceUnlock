@@ -17,6 +17,9 @@ final class FaceSessionProcessor: @unchecked Sendable {
     private let analyzer: FaceAnalyzer
     private let template: FaceTemplate
     private let policy: MatchPolicy
+    private let liveness: LivenessMode
+    /// Receives a diagnostics summary line about every 0.5 s.
+    private let onDiagnostics: (@Sendable (String) -> Void)?
     private let onReadout: (@Sendable (LiveReadout) -> Void)?
     private let onPass: @Sendable () -> Void
     /// Real attempts stop at the first pass; the test window keeps going.
@@ -31,18 +34,28 @@ final class FaceSessionProcessor: @unchecked Sendable {
     private var finished = false
     private var _sawFace = false
     private var _diagnostics = AttemptDiagnostics()
+    private var summarizer: DiagnosticsSummarizer?
 
-    init(analyzer: FaceAnalyzer, template: FaceTemplate, policy: MatchPolicy,
+    init(analyzer: FaceAnalyzer, template: FaceTemplate, policy: MatchPolicy, liveness: LivenessMode,
          onReadout: (@Sendable (LiveReadout) -> Void)? = nil,
+         onDiagnostics: (@Sendable (String) -> Void)? = nil,
          stopsOnPass: Bool = true,
          onPass: @escaping @Sendable () -> Void) {
         self.analyzer = analyzer
         self.template = template
         self.policy = policy
+        self.liveness = liveness
+        self.onDiagnostics = onDiagnostics
         self.onReadout = onReadout
         self.onPass = onPass
         self.stopsOnPass = stopsOnPass
-        self.evaluator = UnlockEvaluator(policy: policy)
+        self.evaluator = UnlockEvaluator(policy: policy, liveness: liveness)
+    }
+
+    /// Emits the last partial diagnostics window (call when the attempt ends).
+    func flushDiagnostics() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let line = lock.withLock({ summarizer?.flush(at: now) }) { onDiagnostics?(line) }
     }
 
     var sawFace: Bool { lock.withLock { _sawFace } }
@@ -66,7 +79,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
             resetRequested = false
             return r
         }
-        if shouldReset { evaluator = UnlockEvaluator(policy: policy) }
+        if shouldReset { evaluator = UnlockEvaluator(policy: policy, liveness: liveness) }
         if lock.withLock({ finished }) { return }
 
         let analysis = analyzer.analyze(pixelBuffer: pixelBuffer)
@@ -80,10 +93,18 @@ final class FaceSessionProcessor: @unchecked Sendable {
             pitchDegrees: analysis.pitchDegrees
         )
         let snapshot = evaluator.observe(observation)
-        lock.withLock {
+        let eyeMean: Double? = {
+            guard let l = analysis.leftEyeOpenness, let r = analysis.rightEyeOpenness else { return nil }
+            return (l + r) / 2
+        }()
+        let line: String? = lock.withLock {
             if analysis.faceCount > 0 { _sawFace = true }
             _diagnostics.observe(snapshot)
+            guard onDiagnostics != nil else { return nil }
+            if summarizer == nil { summarizer = DiagnosticsSummarizer(threshold: policy.threshold, start: time) }
+            return summarizer?.observe(snapshot, eyeOpenness: eyeMean, at: time)
         }
+        if let line { onDiagnostics?(line) }
 
         if let onReadout {
             var eyes: (Double, Double)?

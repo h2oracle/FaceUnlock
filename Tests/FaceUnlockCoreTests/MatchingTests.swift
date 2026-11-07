@@ -153,12 +153,23 @@ import Testing
 }
 
 @Suite struct IntegrityRecordTests {
-    @Test func matchesOnlyWhenDigestAndThresholdAgree() {
-        let r = IntegrityRecord(templateSHA256: "abc", threshold: 0.55)
-        #expect(r.problem(templateSHA256: "abc", threshold: 0.55) == nil)
-        #expect(r.problem(templateSHA256: "abd", threshold: 0.55) == .templateChanged)
-        #expect(r.problem(templateSHA256: nil, threshold: 0.55) == .templateChanged)
-        #expect(r.problem(templateSHA256: "abc", threshold: 0.45) == .thresholdChanged)
-        #expect(IntegrityRecord(templateSHA256: nil, threshold: 0.55).problem(templateSHA256: "abc", threshold: 0.55) == .templateChanged)
+    @Test func matchesOnlyWhenDigestThresholdAndLivenessAgree() {
+        let r = IntegrityRecord(templateSHA256: "abc", threshold: 0.55, livenessMode: .naturalMovement)
+        #expect(r.problem(templateSHA256: "abc", threshold: 0.55, livenessMode: .naturalMovement) == nil)
+        #expect(r.problem(templateSHA256: "abd", threshold: 0.55, livenessMode: .naturalMovement) == .templateChanged)
+        #expect(r.problem(templateSHA256: nil, threshold: 0.55, livenessMode: .naturalMovement) == .templateChanged)
+        #expect(r.problem(templateSHA256: "abc", threshold: 0.45, livenessMode: .naturalMovement) == .thresholdChanged)
+        #expect(r.problem(templateSHA256: "abc", threshold: 0.55, livenessMode: .off) == .livenessChanged)
+        #expect(IntegrityRecord(templateSHA256: nil, threshold: 0.55, livenessMode: .off)
+            .problem(templateSHA256: "abc", threshold: 0.55, livenessMode: .off) == .templateChanged)
+    }
+
+    @Test func recordsWithoutLivenessMeanBlinkAndMovement() throws {
+        let legacy = Data(#"{"templateSHA256":"abc","threshold":0.55}"#.utf8)
+        let r = try JSONDecoder().decode(IntegrityRecord.self, from: legacy)
+        #expect(r.livenessMode == nil)
+        #expect(r.effectiveLivenessMode == .blinkAndMovement)
+        #expect(r.problem(templateSHA256: "abc", threshold: 0.55, livenessMode: .blinkAndMovement) == nil)
+        #expect(r.problem(templateSHA256: "abc", threshold: 0.55, livenessMode: .naturalMovement) == .livenessChanged)
     }
 }

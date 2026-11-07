@@ -47,6 +47,8 @@ final class UnlockCoordinator {
     var integrityProblem: () -> String? = { "Not set up" }
     /// The verified match policy (threshold from the Keychain record).
     var policy: () -> MatchPolicy = { MatchPolicy() }
+    /// The verified liveness mode (from the Keychain record).
+    var liveness: () -> LivenessMode = { .blinkAndMovement }
 
     /// Called whenever `status` changes (for the menu).
     var onStatusChange: (() -> Void)?
@@ -72,6 +74,11 @@ final class UnlockCoordinator {
     private var isSleeping = false
     private var isTyping = false
     private var typingCancellation: TypingCancellation?
+
+    /// Face ID-style indicator on the lock screen (cosmetic, best effort).
+    private let overlay = LockOverlay()
+    /// Last reason an attempt was held back, so each is logged once.
+    private var lastBlockedReason: String?
 
     private var lidWasClosed = false
     private var lidOpenedAt: TimeInterval?
@@ -150,11 +157,27 @@ final class UnlockCoordinator {
     }
 
     private func record(_ outcome: AttemptOutcome) {
+        diag("record: \(outcome.summary)")
         onAttemptRecorded?(AttemptRecord(outcome: outcome))
+    }
+
+    /// Writes to the diagnostics file and the persisted unified log.
+    /// Never pass secrets.
+    private func diag(_ message: String) {
+        Diagnostics.write(message)
+        log.notice("\(message, privacy: .public)")
+    }
+
+    /// Logs (once per distinct reason) why an attempt is being held back.
+    private func blocked(_ reason: String, detail: String = "") {
+        guard reason != lastBlockedReason else { return }
+        lastBlockedReason = reason
+        diag("no attempt: \(reason)\(detail.isEmpty ? "" : " (\(detail))")")
     }
 
     /// Records why no attempt could start (once per lock session).
     private func notReady(_ reason: String) {
+        blocked("not ready: \(reason)")
         status = reason
         guard !recordedNotReadyThisSession else { return }
         recordedNotReadyThisSession = true
@@ -162,6 +185,8 @@ final class UnlockCoordinator {
     }
 
     private func beginLockSession() {
+        lastBlockedReason = nil
+        diag("lock session began (enabled=\(isEnabled()), liveness=\(liveness().rawValue), threshold=\(String(format: "%.2f", policy().threshold)))")
         recordedNotReadyThisSession = false
         inLockSession = true
         lockStartedAt = now
@@ -172,10 +197,19 @@ final class UnlockCoordinator {
 
     private func endLockSession() {
         inLockSession = false
-        // Screen unlocked while (or just after) we typed: it worked.
-        if isTyping { record(.unlocked) }
+        diag(String(format: "lock session ended: screen unlocked after %.1fs", now - lockStartedAt))
+        if isTyping {
+            // Screen unlocked while (or just after) we typed: it worked.
+            record(.unlocked)
+        } else if let processor {
+            // Unlocked by hand while an attempt was still running.
+            processor.flushDiagnostics()
+            record(.unlockedManually(lastIssue: processor.diagnostics.failureOutcome))
+            diag("attempt ended: unlocked manually before a match")
+        }
         cancelTyping()
         cancelAttempt(countAsFailure: false)
+        overlay.hide()
         lockout.startNewLockSession()
     }
 
@@ -190,7 +224,9 @@ final class UnlockCoordinator {
         updateLidState()
         isSleeping = true
         cancelTyping()
+        if processor != nil { diag("attempt ended: Mac/display went to sleep") }
         cancelAttempt(countAsFailure: true)
+        overlay.hide()
     }
 
     private func handleWake() {
@@ -210,8 +246,10 @@ final class UnlockCoordinator {
     private enum Trigger { case wake, activity }
 
     private func maybeStartAttempt(trigger: Trigger) {
-        guard inLockSession, processor == nil, !isTyping, !isSleeping else { return }
+        guard inLockSession, processor == nil, !isTyping else { return }
+        guard !isSleeping else { blocked("asleep"); return }
         guard lockout.canStartAttempt else {
+            blocked("lockout", detail: "failures=\(lockout.failures) attempts=\(lockout.attemptsStarted) passwordRejected=\(lockout.passwordRejected)")
             if !recordedNotReadyThisSession {
                 recordedNotReadyThisSession = true
                 record(.lockedOut)
@@ -225,18 +263,26 @@ final class UnlockCoordinator {
             }
             return
         }
-        guard now - lockStartedAt >= Self.gracePeriodAfterLock else { return }
+        guard now - lockStartedAt >= Self.gracePeriodAfterLock else {
+            blocked("grace period after locking"); return
+        }
         let input = SessionState.secondsSinceUserInput
+        let lidJustOpened = lidOpenedAt.map { now - $0 <= Self.lidOpenWindow } ?? false
         switch trigger {
         case .activity:
-            guard input < Self.recentInput, now - lastAttemptEnded >= Self.retryCooldown else { return }
+            guard input < Self.recentInput else { blocked("waiting for mouse/keyboard input"); return }
+            guard now - lastAttemptEnded >= Self.retryCooldown else { blocked("cooldown after previous attempt"); return }
         case .wake:
-            let lidJustOpened = lidOpenedAt.map { now - $0 <= Self.lidOpenWindow } ?? false
-            guard lidJustOpened || input < Self.recentInput + Self.wakeSettleDelay else { return }
+            guard lidJustOpened || input < Self.recentInput + Self.wakeSettleDelay else {
+                blocked("wake without recent input or lid opening", detail: String(format: "idle %.1fs", input)); return
+            }
         }
         let state = SessionState.current()
-        guard state.screenLocked, state.onConsole, state.loginDone else { return }
-        guard !SessionState.displayAsleep else { return }
+        guard state.screenLocked, state.onConsole, state.loginDone else {
+            blocked("session state", detail: "locked=\(state.screenLocked) onConsole=\(state.onConsole) loginDone=\(state.loginDone)")
+            return
+        }
+        guard !SessionState.displayAsleep else { blocked("display asleep"); return }
         guard isEnabled() else { notReady("face unlock is turned off"); return }
         guard let analyzer, let template, template.modelID == FaceEmbedder.modelID else {
             notReady("no face enrolled"); return
@@ -250,16 +296,29 @@ final class UnlockCoordinator {
         guard PasswordVault.passwordExists() else { notReady("no password stored"); return }
 
         lidOpenedAt = nil
+        lastBlockedReason = nil
         lockout.recordAttemptStarted()
         attemptID += 1
         let id = attemptID
-        let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy()) { [weak self] in
+        let policy = policy()
+        let liveness = liveness()
+        diag(String(format: "attempt %d started: trigger=%@ sinceLock=%.1fs idle=%.1fs lid=%@ liveness=%@ threshold=%.2f",
+                    lockout.attemptsStarted, trigger == .wake ? "wake" : "activity", now - lockStartedAt, input,
+                    lidJustOpened ? "just-opened" : "-", liveness.rawValue, policy.threshold))
+        let processor = FaceSessionProcessor(
+            analyzer: analyzer, template: template, policy: policy, liveness: liveness,
+            onReadout: { [weak self] readout in
+                let progress = readout.snapshot.progress
+                Task { @MainActor in self?.overlay.update(progress: progress) }
+            },
+            onDiagnostics: { line in Diagnostics.write("  \(line)") }
+        ) { [weak self] in
             Task { @MainActor in self?.attemptPassed(id: id) }
         }
         self.processor = processor
         isAttempting = true
         status = "Looking for your face… (attempt \(lockout.attemptsStarted) of max \(lockout.maximumAttempts))"
-        log.info("Face unlock attempt started")
+        overlay.showScanning()
 
         camera.start(device: device, handler: { pixelBuffer, time in
             processor.process(pixelBuffer, at: time)
@@ -289,6 +348,7 @@ final class UnlockCoordinator {
     /// Only attempts in which a face was seen count as failures.
     private func cancelAttempt(countAsFailure: Bool) {
         guard let processor else { return }
+        processor.flushDiagnostics()
         let sawFace = processor.sawFace
         let diagnostics = processor.diagnostics
         stopCamera()
@@ -301,15 +361,20 @@ final class UnlockCoordinator {
     private func attemptFailedToStart(id: Int, message: String) {
         guard id == attemptID, processor != nil else { return }
         stopCamera()
+        overlay.hide()
+        diag("attempt ended: camera error: \(message)")
         status = "Camera error: \(message)"
         record(.cameraError(message))
     }
 
     private func attemptTimedOut(id: Int) {
         guard id == attemptID, let processor else { return }
+        processor.flushDiagnostics()
         let sawFace = processor.sawFace
         let diagnostics = processor.diagnostics
         stopCamera()
+        diag("attempt ended: timed out after \(Int(Self.attemptDuration))s without a match")
+        if sawFace { overlay.showFailure() } else { overlay.hide() }
         record(diagnostics.failureOutcome)
         if sawFace {
             lockout.recordFailure()
@@ -319,12 +384,13 @@ final class UnlockCoordinator {
         } else {
             status = "No face seen; will retry on activity"
         }
-        log.info("Face unlock attempt ended without a match (face seen: \(sawFace, privacy: .public))")
     }
 
     private func attemptPassed(id: Int) {
-        guard id == attemptID, processor != nil else { return }
+        guard id == attemptID, let processor else { return }
+        processor.flushDiagnostics()
         stopCamera()
+        diag("attempt ended: face matched with liveness")
 
         // Re-verify everything right before typing.
         let state = SessionState.current()
@@ -332,6 +398,8 @@ final class UnlockCoordinator {
               state.screenLocked, state.onConsole, state.loginDone,
               Permissions.accessibilityTrusted else {
             status = "Match ignored (state changed)"
+            diag("match ignored: state changed before typing")
+            overlay.hide()
             return
         }
 
@@ -339,7 +407,8 @@ final class UnlockCoordinator {
         typingCancellation = cancellation
         isTyping = true
         status = "Recognised – unlocking…"
-        log.info("Face matched with liveness; typing password")
+        overlay.showSuccess()
+        diag("typing password")
         Task.detached(priority: .userInitiated) { [weak self] in
             let failure: AttemptOutcome?
             do {
@@ -368,6 +437,7 @@ final class UnlockCoordinator {
             // Couldn't read or type the password: stop for this lock session.
             lockout.recordPasswordRejected()
             status = failure.summary
+            overlay.hide()
             record(failure)
             log.error("Typing aborted: \(failure.summary, privacy: .public)")
             return
@@ -381,6 +451,7 @@ final class UnlockCoordinator {
                     self.lockout.recordPasswordRejected()
                     self.status = "Typed password did not unlock. Check the stored password."
                     self.record(.passwordRejected)
+                    self.overlay.hide()
                     log.error("Typed password did not unlock the screen; stopping for this lock session")
                 }
             }

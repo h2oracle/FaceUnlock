@@ -24,6 +24,8 @@ final class SetupModel {
     var launchAtLogin = true
     var launchAtLoginNote: String?
 
+    var livenessMode: LivenessMode = .default
+
     var lockCountdown: Int?
     var lastAttempt: AttemptRecord?
 
@@ -51,6 +53,7 @@ struct SetupActions {
     var stopTest: () -> Void
     var setEnabled: (Bool) -> Void
     var setLaunchAtLogin: (Bool) -> Void
+    var setLiveness: (LivenessMode) -> Void
     var lockNow: () -> Void
     var done: () -> Void
 }
@@ -167,6 +170,16 @@ struct SetupView: View {
     }
 
     @ViewBuilder private func testContent(_ state: StepState) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Liveness", selection: Binding(get: { model.livenessMode }, set: { actions.setLiveness($0) })) {
+                ForEach(LivenessMode.allCases, id: \.self) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 420)
+            Text(model.livenessMode.securityNote).font(.caption).foregroundStyle(.secondary)
+        }
         if let test = model.test {
             TestView(session: session, model: test, reset: {
                 test.passed = false
@@ -199,7 +212,9 @@ struct SetupView: View {
                 Button("Lock screen now", action: actions.lockNow)
             }
         }
-        Text("After the screen locks, wait about 5 seconds, then move the mouse or press Shift and look at the camera. Blink once.")
+        Text(model.livenessMode == .blinkAndMovement
+            ? "After the screen locks, wait about 5 seconds, then move the mouse or press Shift and look at the camera. Blink once."
+            : "After the screen locks, wait about 5 seconds, then move the mouse or press Shift and look at the camera.")
             .font(.caption).foregroundStyle(.secondary)
     }
 }

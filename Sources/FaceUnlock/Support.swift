@@ -34,6 +34,61 @@ enum Settings {
     }
 
     static var policy: MatchPolicy { MatchPolicy(threshold: matchThreshold) }
+
+    private static let livenessKey = "livenessMode"
+
+    static var hasLivenessMode: Bool { defaults.string(forKey: livenessKey) != nil }
+
+    /// Liveness requirement. Like the threshold, it's also recorded in the
+    /// Keychain integrity item; a mismatch blocks unlocking.
+    static var livenessMode: LivenessMode {
+        get { defaults.string(forKey: livenessKey).flatMap(LivenessMode.init(rawValue:)) ?? .default }
+        set { defaults.set(newValue.rawValue, forKey: livenessKey) }
+    }
+}
+
+// MARK: - Diagnostics file
+
+/// Plain-text attempt diagnostics in
+/// ~/Library/Application Support/FaceUnlock/diagnostics.log (0600), rotated
+/// to diagnostics.log.1 at ~1 MB. Only numbers, states and reasons: never the
+/// password, embeddings or images. Writes happen on a private serial queue.
+enum Diagnostics {
+    private static let queue = DispatchQueue(label: "uk.co.sid.faceunlock.diagnostics", qos: .utility)
+    private static let maximumBytes: UInt64 = 1_000_000
+
+    static var fileURL: URL { TemplateStore.standard.directory.appendingPathComponent("diagnostics.log") }
+
+    static func write(_ message: String) {
+        let stamp = Date().formatted(.iso8601.year().month().day().time(includingFractionalSeconds: true))
+        let line = "\(stamp) \(message)\n"
+        queue.async { append(line) }
+    }
+
+    private static func append(_ line: String) {
+        let fm = FileManager.default
+        let url = fileURL
+        let dir = url.deletingLastPathComponent()
+        do {
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            }
+            if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? UInt64, size > maximumBytes {
+                let old = dir.appendingPathComponent("diagnostics.log.1")
+                try? fm.removeItem(at: old)
+                try fm.moveItem(at: url, to: old)
+            }
+            if !fm.fileExists(atPath: url.path) {
+                guard fm.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else { return }
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(line.utf8))
+        } catch {
+            // Diagnostics must never affect unlocking.
+        }
+    }
 }
 
 // MARK: - Permissions

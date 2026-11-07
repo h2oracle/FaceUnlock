@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return self.integrityProblem
         }
         coordinator.policy = { [weak self] in self?.verifiedPolicy ?? MatchPolicy() }
+        coordinator.liveness = { [weak self] in self?.verifiedLiveness ?? .blinkAndMovement }
         coordinator.onStatusChange = { [weak self] in self?.updateIcon() }
         coordinator.onLockSessionBegan = { [weak self] in self?.stopCameraUse() }
         coordinator.onAttemptRecorded = { [weak self] record in
@@ -93,11 +94,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard template != nil else { return "Not enrolled" }
         guard integrityLoaded else { return "Checking Keychain…" }
         guard let integrity else { return "Template changed – re-enrol" }
-        switch integrity.problem(templateSHA256: templateDigest, threshold: Settings.matchThreshold) {
+        switch integrity.problem(templateSHA256: templateDigest, threshold: Settings.matchThreshold,
+                                 livenessMode: Settings.livenessMode) {
         case nil: return nil
         case .templateChanged: return "Template changed – re-enrol"
         case .thresholdChanged: return "Threshold changed outside FaceUnlock – choose Match strictness again"
+        case .livenessChanged: return "Liveness setting changed outside FaceUnlock – choose it again"
         }
+    }
+
+    /// Liveness mode as recorded in the Keychain (only used when it matches).
+    private var verifiedLiveness: LivenessMode {
+        integrity?.effectiveLivenessMode ?? Settings.livenessMode
     }
 
     /// Threshold as recorded in the Keychain (only used when it matches).
@@ -121,6 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             await MainActor.run {
                 guard let self else { return }
+                // Records written before the liveness setting existed vouch for
+                // blink + movement; keep that until the user picks another mode.
+                if let record, record.livenessMode == nil, !Settings.hasLivenessMode {
+                    Settings.livenessMode = .blinkAndMovement
+                }
                 self.integrity = record
                 self.integrityLoaded = true
                 self.passwordReadable = readable
@@ -135,7 +148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func saveIntegrity() throws {
-        let record = IntegrityRecord(templateSHA256: templateDigest, threshold: Settings.matchThreshold)
+        let record = IntegrityRecord(templateSHA256: templateDigest, threshold: Settings.matchThreshold,
+                                     livenessMode: Settings.livenessMode)
         try PasswordVault.saveIntegrity(record)
         integrity = record
         integrityLoaded = true
@@ -205,6 +219,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         strictness.submenu = sub
         menu.addItem(strictness)
+
+        let livenessItem = NSMenuItem(title: "Liveness", action: nil, keyEquivalent: "")
+        let livenessMenu = NSMenu()
+        for mode in LivenessMode.allCases {
+            let choice = item(mode.title, #selector(chooseLiveness(_:)))
+            choice.representedObject = mode.rawValue
+            choice.state = Settings.livenessMode == mode ? .on : .off
+            choice.toolTip = mode.securityNote
+            livenessMenu.addItem(choice)
+        }
+        livenessItem.submenu = livenessMenu
+        menu.addItem(livenessItem)
         menu.addItem(.separator())
 
         switch Permissions.cameraStatus {
@@ -309,6 +335,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.applyLaunchAtLoginDefault()
             self?.updateIcon()
             self?.refreshSetup()
+        }
+    }
+
+    @objc private func chooseLiveness(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = LivenessMode(rawValue: raw) else { return }
+        setLiveness(mode)
+    }
+
+    /// Password-gated, and recorded in the Keychain integrity item.
+    private func setLiveness(_ mode: LivenessMode) {
+        guard mode != Settings.livenessMode || integrityProblem != nil else { return }
+        requireLoginPassword("Enter your Mac login password to change the liveness check to “\(mode.title)”.") { [weak self] in
+            guard let self else { return }
+            Settings.livenessMode = mode
+            do {
+                try self.saveIntegrity()
+            } catch {
+                self.alert("Couldn't save setting", String(describing: error))
+            }
+            // The test result was for the old mode; a running test uses it too.
+            SetupStore.testPassedForDigest = nil
+            self.stopTest()
+            self.updateIcon()
+            self.refreshSetup()
         }
     }
 
@@ -513,6 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.toggleEnabled()
             },
             setLaunchAtLogin: { [weak self] on in self?.setLaunchAtLogin(on) },
+            setLiveness: { [weak self] mode in self?.setLiveness(mode) },
             lockNow: { [weak self] in self?.lockScreenWithCountdown() },
             done: { [weak self] in self?.setupWindow?.close() }
         )
@@ -571,13 +622,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             details[.enrol] = "Enrolled. Re-enrol if you change your look or it struggles in some lighting."
         }
 
+        m.livenessMode = Settings.livenessMode
         let threshold = String(format: "%.2f", verifiedPolicy.threshold)
         if let digest = templateDigest, SetupStore.testPassedForDigest == digest {
             conditions[.test] = .done
-            details[.test] = "Passed: recognised you with a blink and head movement (threshold \(threshold))."
+            details[.test] = "Passed with liveness “\(verifiedLiveness.title)” (threshold \(threshold))."
         } else {
             conditions[.test] = .notDone
-            details[.test] = "Check that it recognises you live: blink once and move your head a little until it says PASS (threshold \(threshold))."
+            let how: String
+            switch verifiedLiveness {
+            case .naturalMovement: how = "look at the camera naturally for a second or two"
+            case .blinkAndMovement: how = "blink once and move your head a little"
+            case .off: how = "look at the camera"
+            }
+            details[.test] = "Check that it recognises you live: \(how) until it says PASS (threshold \(threshold))."
         }
 
         let enabled = Settings.isEnabled
@@ -766,7 +824,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let policy = verifiedPolicy
         model.threshold = policy.threshold
         let digest = templateDigest
-        let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy, onReadout: { [weak self] readout in
+        let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy,
+                                             liveness: verifiedLiveness, onReadout: { [weak self] readout in
             Task { @MainActor in
                 model.apply(readout)
                 if readout.snapshot.shouldUnlock, let digest, SetupStore.testPassedForDigest != digest {
