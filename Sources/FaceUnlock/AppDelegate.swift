@@ -47,7 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator = UnlockCoordinator(camera: camera, analyzer: analyzer)
         coordinator.template = template
         coordinator.isEnabled = { Settings.isEnabled }
-        coordinator.integrityProblem = { [weak self] in self?.integrityProblem ?? "Not set up" }
+        // Note: `self?.integrityProblem ?? x` would flatten the String?? and turn
+        // "no problem" (nil) into x — so unwrap self explicitly.
+        coordinator.integrityProblem = { [weak self] in
+            guard let self else { return "Not set up" }
+            return self.integrityProblem
+        }
         coordinator.policy = { [weak self] in self?.verifiedPolicy ?? MatchPolicy() }
         coordinator.onStatusChange = { [weak self] in self?.updateIcon() }
         coordinator.onLockSessionBegan = { [weak self] in self?.stopCameraUse() }
