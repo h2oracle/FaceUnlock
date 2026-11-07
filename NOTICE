@@ -1,0 +1,58 @@
+FaceUnlock
+==========
+
+Third-party components and acknowledgements.
+
+1. SFace face-recognition model (bundled as Models/SFace.mlpackage)
+-------------------------------------------------------------------
+Source:  OpenCV Zoo, models/face_recognition_sface
+         https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface
+File:    face_recognition_sface_2021dec.onnx
+         sha256 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
+License: Apache License 2.0 (full text in Models/LICENSE-SFace.txt)
+Credits: SFace by Yaoyao Zhong et al. ("SFace: Sigmoid-Constrained Hypersphere
+         Loss for Robust Face Recognition", arXiv:2205.12010); ONNX conversion
+         by Chengrui Wang for OpenCV Zoo.
+
+Modification: converted from ONNX to Core ML (mlprogram, float16) with
+tools/convert_sface.py. The conversion was checked numerically against the
+original ONNX graph (cosine similarity > 0.999 on random inputs). No retraining.
+
+Note: the upstream SFace research repository (github.com/zhongyy/SFace) does
+not carry its own licence file; the weights used here are the ones OpenCV Zoo
+distributes under Apache-2.0.
+
+2. Glance (https://github.com/jonnyoo/glance), MIT License
+----------------------------------------------------------
+FaceUnlock is original code, but its overall approach was informed by reading
+Glance: unlocking by typing the stored password with CGEvent keyboard events
+carrying Unicode strings, clearing the field first with layout-independent
+Cmd+Right / Cmd+Delete, reading the authoritative lock state from
+CGSessionCopyCurrentDictionary, and aligning faces to the standard 5-point
+112x112 template before embedding. Glance's licence:
+
+  MIT License
+
+  Copyright (c) 2026 Jonathan Zhou
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+Glance itself uses InsightFace's w600k_mbf ArcFace weights. FaceUnlock does
+NOT use them: InsightFace's pretrained models are licensed for non-commercial
+research use only.

@@ -1,0 +1,68 @@
+import Foundation
+
+/// Collects good-quality embeddings during enrolment, walking the user
+/// through a few gentle head poses.
+public struct EnrolmentCollector: Sendable {
+    public struct Step: Equatable, Sendable {
+        public var instruction: String
+        public var samples: Int
+    }
+
+    public static let steps: [Step] = [
+        Step(instruction: "Look straight at the camera", samples: 6),
+        Step(instruction: "Turn your head slightly left", samples: 4),
+        Step(instruction: "Turn your head slightly right", samples: 4),
+        Step(instruction: "Tilt your head slightly up", samples: 4),
+    ]
+
+    /// VNDetectFaceCaptureQualityRequest score below which frames are rejected.
+    public var minimumQuality: Float = 0.35
+    /// Minimum seconds between accepted frames, so samples aren't near-duplicates.
+    public var minimumInterval: TimeInterval = 0.2
+    /// Seconds after each new instruction before frames are taken, so the
+    /// user has time to read it and move.
+    public var stepSettleTime: TimeInterval = 1.2
+
+    public private(set) var embeddings: [[Float]] = []
+    public private(set) var stepIndex = 0
+    private var acceptedInStep = 0
+    private var lastAccepted: TimeInterval = -.infinity
+    private var stepStartedAt: TimeInterval?
+    public private(set) var lastRejection: String?
+
+    public init() {}
+
+    public var totalRequired: Int { Self.steps.reduce(0) { $0 + $1.samples } }
+    public var isComplete: Bool { stepIndex >= Self.steps.count }
+    public var currentInstruction: String {
+        isComplete ? "Done" : Self.steps[stepIndex].instruction
+    }
+    public var progress: Double { Double(embeddings.count) / Double(totalRequired) }
+
+    /// Returns true if the frame was accepted.
+    @discardableResult
+    public mutating func offer(_ frame: FrameAnalysis, at time: TimeInterval) -> Bool {
+        guard !isComplete else { return false }
+        if stepStartedAt == nil { stepStartedAt = time }
+        guard let started = stepStartedAt, time - started >= stepSettleTime else { return false }
+        if frame.faceCount == 0 { lastRejection = "No face found"; return false }
+        if frame.faceCount > 1 { lastRejection = "More than one face in view"; return false }
+        guard let quality = frame.captureQuality, quality >= minimumQuality else {
+            lastRejection = "Image quality too low – improve lighting, hold still"
+            return false
+        }
+        guard let embedding = frame.embedding else { lastRejection = "Couldn't read face landmarks"; return false }
+        guard time - lastAccepted >= minimumInterval else { return false }
+
+        lastRejection = nil
+        lastAccepted = time
+        embeddings.append(embedding)
+        acceptedInStep += 1
+        if acceptedInStep >= Self.steps[stepIndex].samples {
+            stepIndex += 1
+            acceptedInStep = 0
+            stepStartedAt = time
+        }
+        return true
+    }
+}

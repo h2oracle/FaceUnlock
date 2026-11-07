@@ -1,0 +1,7 @@
+.build/
+build/
+*.mlmodelc
+.DS_Store
+.swiftpm/
+__pycache__/
+.venv/
