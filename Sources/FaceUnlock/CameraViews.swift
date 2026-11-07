@@ -24,35 +24,6 @@ struct CameraPreview: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
-/// Hosts a SwiftUI view in a small, closable window and reports closure.
-@MainActor
-final class CameraWindow: NSObject, NSWindowDelegate {
-    let window: NSWindow
-    private let onClose: () -> Void
-
-    init<V: View>(title: String, size: NSSize, content: V, onClose: @escaping () -> Void) {
-        window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
-                          styleMask: [.titled, .closable],
-                          backing: .buffered, defer: false)
-        self.onClose = onClose
-        super.init()
-        window.title = title
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: content)
-        window.delegate = self
-        window.center()
-    }
-
-    func show() {
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func close() { window.close() }
-
-    func windowWillClose(_ notification: Notification) { onClose() }
-}
-
 // MARK: - Enrolment
 
 @MainActor
@@ -81,8 +52,7 @@ struct EnrolmentView: View {
             Text("Only numeric face embeddings are saved – never images.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
-        .padding(20)
-        .frame(width: 520)
+        .frame(width: 480)
     }
 }
 
@@ -159,14 +129,13 @@ struct TestView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
-                Text("Blink once and move your head a little. Nothing is typed in this window.")
+                Text("Blink once and move your head a little. Nothing is typed here.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Reset", action: reset)
             }
         }
-        .padding(20)
-        .frame(width: 520)
+        .frame(width: 480)
     }
 }
 

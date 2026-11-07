@@ -27,11 +27,17 @@ final class TypingCancellation: @unchecked Sendable {
 enum LockScreenGuard {
     static let loginWindowPath = "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"
 
-    /// nil if the lock screen is in front, otherwise a reason (for the log;
-    /// contains only process names, never window contents).
-    static func problem() -> String? {
+    enum Verdict: Equatable {
+        case lockScreenInFront
+        /// Process name of the full-screen window in front (no window contents).
+        case otherOwner(String)
+        case noFullScreenWindow
+        case unavailable
+    }
+
+    static func check() -> Verdict {
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
-            return "window list unavailable"
+            return .unavailable
         }
         let display = CGDisplayBounds(CGMainDisplayID())
         let minimumArea = display.width * display.height * 0.9
@@ -43,11 +49,10 @@ enum LockScreenGuard {
             let covered = bounds.intersection(display)
             guard alpha > 0, !covered.isNull, covered.width * covered.height >= minimumArea else { continue }
             let pid = (window[kCGWindowOwnerPID as String] as? Int32) ?? -1
-            let owner = (window[kCGWindowOwnerName as String] as? String) ?? "?"
-            if executablePath(of: pid) == loginWindowPath { return nil }
-            return "front full-screen window belongs to \(owner)"
+            let owner = (window[kCGWindowOwnerName as String] as? String) ?? "unknown"
+            return executablePath(of: pid) == loginWindowPath ? .lockScreenInFront : .otherOwner(owner)
         }
-        return "no full-screen window in front"
+        return .noFullScreenWindow
     }
 
     private static func executablePath(of pid: Int32) -> String? {
@@ -68,12 +73,18 @@ enum LockScreenGuard {
 enum KeyTyper {
     enum TypingError: Error, CustomStringConvertible {
         case eventCreationFailed
-        case aborted(String)
+        case cancelled
+        case notLocked
+        case frontWindow(LockScreenGuard.Verdict)
 
         var description: String {
             switch self {
             case .eventCreationFailed: return "couldn't create keyboard event"
-            case .aborted(let why): return "stopped typing: \(why)"
+            case .cancelled: return "cancelled"
+            case .notLocked: return "screen no longer locked for this session"
+            case .frontWindow(.otherOwner(let owner)): return "front window belongs to \(owner)"
+            case .frontWindow(.noFullScreenWindow): return "no full-screen window in front"
+            case .frontWindow: return "window list unavailable"
             }
         }
     }
@@ -92,15 +103,14 @@ enum KeyTyper {
         }
     }
 
-    /// Throws `.aborted` unless this session's screen is still locked, on
+    /// Throws unless this session's screen is still locked, on
     /// the console, the lock screen is in front and nobody cancelled.
     private static func ensureSafe(_ cancellation: TypingCancellation) throws {
-        if cancellation.isCancelled { throw TypingError.aborted("cancelled") }
+        if cancellation.isCancelled { throw TypingError.cancelled }
         let state = SessionState.current()
-        guard state.screenLocked, state.onConsole, state.loginDone else {
-            throw TypingError.aborted("screen no longer locked for this session")
-        }
-        if let problem = LockScreenGuard.problem() { throw TypingError.aborted(problem) }
+        guard state.screenLocked, state.onConsole, state.loginDone else { throw TypingError.notLocked }
+        let verdict = LockScreenGuard.check()
+        guard verdict == .lockScreenInFront else { throw TypingError.frontWindow(verdict) }
     }
 
     /// Clears the field, types `secret`, presses Return, checking safety

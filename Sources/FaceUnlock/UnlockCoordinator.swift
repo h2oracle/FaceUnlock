@@ -50,8 +50,13 @@ final class UnlockCoordinator {
 
     /// Called whenever `status` changes (for the menu).
     var onStatusChange: (() -> Void)?
-    /// Called when a lock session begins (close camera windows).
+    /// Called when a lock session begins (stop any camera use in windows).
     var onLockSessionBegan: (() -> Void)?
+    /// Called with the outcome of each lock-screen attempt (persisted by the
+    /// app for the setup window's lock-screen test).
+    var onAttemptRecorded: ((AttemptRecord) -> Void)?
+    /// One "didn't run" record per lock session is enough.
+    private var recordedNotReadyThisSession = false
     /// Whether the camera is currently owned by an unlock attempt.
     private(set) var isAttempting = false
 
@@ -144,7 +149,20 @@ final class UnlockCoordinator {
         return integrityProblem() ?? "Ready (waiting for screen lock)"
     }
 
+    private func record(_ outcome: AttemptOutcome) {
+        onAttemptRecorded?(AttemptRecord(outcome: outcome))
+    }
+
+    /// Records why no attempt could start (once per lock session).
+    private func notReady(_ reason: String) {
+        status = reason
+        guard !recordedNotReadyThisSession else { return }
+        recordedNotReadyThisSession = true
+        record(.notReady(reason))
+    }
+
     private func beginLockSession() {
+        recordedNotReadyThisSession = false
         inLockSession = true
         lockStartedAt = now
         lockout.startNewLockSession()
@@ -154,6 +172,8 @@ final class UnlockCoordinator {
 
     private func endLockSession() {
         inLockSession = false
+        // Screen unlocked while (or just after) we typed: it worked.
+        if isTyping { record(.unlocked) }
         cancelTyping()
         cancelAttempt(countAsFailure: false)
         lockout.startNewLockSession()
@@ -191,8 +211,11 @@ final class UnlockCoordinator {
 
     private func maybeStartAttempt(trigger: Trigger) {
         guard inLockSession, processor == nil, !isTyping, !isSleeping else { return }
-        guard isEnabled() else { status = "Screen locked (face unlock disabled)"; return }
         guard lockout.canStartAttempt else {
+            if !recordedNotReadyThisSession {
+                recordedNotReadyThisSession = true
+                record(.lockedOut)
+            }
             if lockout.passwordRejected {
                 status = "Stopped: password could not be typed or did not unlock. Unlock manually."
             } else if lockout.isLockedOut {
@@ -214,16 +237,17 @@ final class UnlockCoordinator {
         let state = SessionState.current()
         guard state.screenLocked, state.onConsole, state.loginDone else { return }
         guard !SessionState.displayAsleep else { return }
+        guard isEnabled() else { notReady("face unlock is turned off"); return }
         guard let analyzer, let template, template.modelID == FaceEmbedder.modelID else {
-            status = "Not enrolled"; return
+            notReady("no face enrolled"); return
         }
-        if let problem = integrityProblem() { status = problem; return }
+        if let problem = integrityProblem() { notReady(problem); return }
         guard let device = CameraSession.device(uniqueID: template.cameraID), template.cameraID != nil else {
-            status = "Enrolled camera not available"; return
+            notReady("the enrolled camera isn't available"); return
         }
-        guard Permissions.cameraAuthorized else { status = "Camera permission missing"; return }
-        guard Permissions.accessibilityTrusted else { status = "Accessibility permission missing"; return }
-        guard PasswordVault.passwordExists() else { status = "No password stored"; return }
+        guard Permissions.cameraAuthorized else { notReady("camera permission missing"); return }
+        guard Permissions.accessibilityTrusted else { notReady("Accessibility permission missing"); return }
+        guard PasswordVault.passwordExists() else { notReady("no password stored"); return }
 
         lidOpenedAt = nil
         lockout.recordAttemptStarted()
@@ -266,20 +290,27 @@ final class UnlockCoordinator {
     private func cancelAttempt(countAsFailure: Bool) {
         guard let processor else { return }
         let sawFace = processor.sawFace
+        let diagnostics = processor.diagnostics
         stopCamera()
-        if countAsFailure && sawFace { lockout.recordFailure() }
+        if countAsFailure && sawFace {
+            lockout.recordFailure()
+            record(diagnostics.failureOutcome)
+        }
     }
 
     private func attemptFailedToStart(id: Int, message: String) {
         guard id == attemptID, processor != nil else { return }
         stopCamera()
         status = "Camera error: \(message)"
+        record(.cameraError(message))
     }
 
     private func attemptTimedOut(id: Int) {
         guard id == attemptID, let processor else { return }
         let sawFace = processor.sawFace
+        let diagnostics = processor.diagnostics
         stopCamera()
+        record(diagnostics.failureOutcome)
         if sawFace {
             lockout.recordFailure()
             status = lockout.canStartAttempt
@@ -310,30 +341,35 @@ final class UnlockCoordinator {
         status = "Recognised – unlocking…"
         log.info("Face matched with liveness; typing password")
         Task.detached(priority: .userInitiated) { [weak self] in
-            let outcome: String?
+            let failure: AttemptOutcome?
             do {
                 let secret = try PasswordVault.readPassword()
                 defer { secret.wipe() }
                 KeyTyper.wakeDisplay()
                 usleep(250_000)
                 try KeyTyper.typeAndSubmit(secret, cancellation: cancellation)
-                outcome = nil
+                failure = nil
+            } catch let error as PasswordVault.VaultError {
+                failure = .keychainError(error.description)
+            } catch KeyTyper.TypingError.frontWindow(.otherOwner(let owner)) {
+                failure = .frontWindowRefused(owner: owner)
             } catch {
-                outcome = String(describing: error)
+                failure = .typingStopped(String(describing: error))
             }
-            await MainActor.run { self?.typingFinished(id: id, error: outcome) }
+            await MainActor.run { self?.typingFinished(id: id, failure: failure) }
         }
     }
 
-    private func typingFinished(id: Int, error: String?) {
+    private func typingFinished(id: Int, failure: AttemptOutcome?) {
         guard id == attemptID, isTyping else { return }
-        if let error {
+        if let failure {
             isTyping = false
             typingCancellation = nil
             // Couldn't read or type the password: stop for this lock session.
             lockout.recordPasswordRejected()
-            status = "Couldn't type password: \(error)"
-            log.error("Typing aborted: \(error, privacy: .public)")
+            status = failure.summary
+            record(failure)
+            log.error("Typing aborted: \(failure.summary, privacy: .public)")
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.unlockConfirmTimeout) { [weak self] in
@@ -344,6 +380,7 @@ final class UnlockCoordinator {
                 if SessionState.current().screenLocked && self.inLockSession {
                     self.lockout.recordPasswordRejected()
                     self.status = "Typed password did not unlock. Check the stored password."
+                    self.record(.passwordRejected)
                     log.error("Typed password did not unlock the screen; stopping for this lock session")
                 }
             }

@@ -106,3 +106,72 @@ enum Clamshell {
         return value as? Bool
     }
 }
+
+// MARK: - Setup state (non-sensitive, UserDefaults)
+
+@MainActor
+enum SetupStore {
+    private static let defaults = UserDefaults.standard
+    private static let lastAttemptKey = "lastAttemptRecord"
+    private static let testPassedKey = "testPassedTemplateSHA256"
+    private static let launchChoiceKey = "launchAtLoginChosen"
+
+    /// Most recent lock-screen attempt (time, outcome, reason; no secrets).
+    static var lastAttempt: AttemptRecord? {
+        get {
+            guard let data = defaults.data(forKey: lastAttemptKey) else { return nil }
+            return try? JSONDecoder().decode(AttemptRecord.self, from: data)
+        }
+        set {
+            if let newValue, let data = try? JSONEncoder().encode(newValue) {
+                defaults.set(data, forKey: lastAttemptKey)
+            } else {
+                defaults.removeObject(forKey: lastAttemptKey)
+            }
+        }
+    }
+
+    /// Digest of the template for which "Test recognition" last passed;
+    /// re-enrolling makes the test step pending again.
+    static var testPassedForDigest: String? {
+        get { defaults.string(forKey: testPassedKey) }
+        set { defaults.set(newValue, forKey: testPassedKey) }
+    }
+
+    /// Whether the user has explicitly set Launch at login (otherwise the
+    /// setup window defaults it to on when face unlock is turned on).
+    static var launchAtLoginChosen: Bool {
+        get { defaults.bool(forKey: launchChoiceKey) }
+        set { defaults.set(newValue, forKey: launchChoiceKey) }
+    }
+}
+
+// MARK: - Locking the screen (setup's lock-screen test)
+
+enum ScreenLocker {
+    /// Locks the screen. Uses `SACLockScreenImmediate` from the system
+    /// login.framework (what the menu-bar "Lock Screen" command uses; private
+    /// API, looked up at run time). Falls back to posting Ctrl+Cmd+Q, which
+    /// needs Accessibility permission.
+    static func lockNow() {
+        typealias LockFunction = @convention(c) () -> Int32
+        let path = "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
+        if let handle = dlopen(path, RTLD_LAZY), let symbol = dlsym(handle, "SACLockScreenImmediate") {
+            let lock = unsafeBitCast(symbol, to: LockFunction.self)
+            if lock() == 0 { return }
+        }
+        postLockShortcut()
+    }
+
+    private static func postLockShortcut() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let q: CGKeyCode = 0x0C
+        let flags: CGEventFlags = [.maskCommand, .maskControl]
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: q, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: q, keyDown: false) else { return }
+        down.flags = flags
+        up.flags = flags
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+    }
+}

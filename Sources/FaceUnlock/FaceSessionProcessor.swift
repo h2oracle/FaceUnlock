@@ -30,6 +30,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
     private let lock = NSLock()
     private var finished = false
     private var _sawFace = false
+    private var _diagnostics = AttemptDiagnostics()
 
     init(analyzer: FaceAnalyzer, template: FaceTemplate, policy: MatchPolicy,
          onReadout: (@Sendable (LiveReadout) -> Void)? = nil,
@@ -45,6 +46,8 @@ final class FaceSessionProcessor: @unchecked Sendable {
     }
 
     var sawFace: Bool { lock.withLock { _sawFace } }
+    /// Whole-attempt summary used to explain a failure.
+    var diagnostics: AttemptDiagnostics { lock.withLock { _diagnostics } }
 
     /// Stops reporting a pass. Idempotent.
     func finish() { lock.withLock { finished = true } }
@@ -77,7 +80,10 @@ final class FaceSessionProcessor: @unchecked Sendable {
             pitchDegrees: analysis.pitchDegrees
         )
         let snapshot = evaluator.observe(observation)
-        if analysis.faceCount > 0 { lock.withLock { _sawFace = true } }
+        lock.withLock {
+            if analysis.faceCount > 0 { _sawFace = true }
+            _diagnostics.observe(snapshot)
+        }
 
         if let onReadout {
             var eyes: (Double, Double)?

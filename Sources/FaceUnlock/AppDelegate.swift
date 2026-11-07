@@ -22,10 +22,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var passwordReadable = true
     private var coordinator: UnlockCoordinator!
 
-    private var enrolmentWindow: CameraWindow?
     private var enrolmentRunner: EnrolmentRunner?
-    private var testWindow: CameraWindow?
     private var testProcessor: FaceSessionProcessor?
+
+    private let setupModel = SetupModel()
+    private var setupWindow: SetupWindowController?
+    private var setupTimer: Timer?
+    /// Open Setup automatically once the first Keychain check has finished,
+    /// if any required step is still missing.
+    private var openSetupAfterFirstLoad = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -45,7 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.integrityProblem = { [weak self] in self?.integrityProblem ?? "Not set up" }
         coordinator.policy = { [weak self] in self?.verifiedPolicy ?? MatchPolicy() }
         coordinator.onStatusChange = { [weak self] in self?.updateIcon() }
-        coordinator.onLockSessionBegan = { [weak self] in self?.closeCameraWindows() }
+        coordinator.onLockSessionBegan = { [weak self] in self?.stopCameraUse() }
+        coordinator.onAttemptRecorded = { [weak self] record in
+            SetupStore.lastAttempt = record
+            self?.refreshSetup()
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         menu.delegate = self
@@ -57,12 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.start()
     }
 
-    /// Opening the app again (Spotlight, Finder, `open`) pops the menu up at the
-    /// mouse pointer — the menu-bar icon can be hidden behind the notch when the
-    /// menu bar is full.
+    /// Opening the app again (Spotlight, Finder, `open`) shows the Setup
+    /// window – the menu-bar icon can be hidden behind the notch when the
+    /// menu bar is full. When setup is complete it shows the summary state.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        NSApp.activate()
-        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        showSetup()
         return false
     }
 
@@ -112,6 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.integrityLoaded = true
                 self.passwordReadable = readable
                 self.updateIcon()
+                self.refreshSetup()
+                if self.openSetupAfterFirstLoad {
+                    self.openSetupAfterFirstLoad = false
+                    if !self.setupModel.progress.requiredComplete { self.showSetup() }
+                }
             }
         }
     }
@@ -147,6 +160,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let problems = readyProblems
+
+        menu.addItem(item("Setup…", #selector(openSetup)))
+        menu.addItem(.separator())
 
         let header = NSMenuItem(title: "FaceUnlock – \(coordinator.status)", action: nil, keyEquivalent: "")
         header.isEnabled = false
@@ -230,13 +246,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Asks for the Mac login password and runs `action` only if
     /// OpenDirectory accepts it. Guards every security-relevant change.
     private func requireLoginPassword(_ reason: String, then action: @escaping @MainActor () -> Void) {
+        // Within a Setup session, a password verified in the last 5 minutes
+        // is reused (only its timestamp is kept).
+        if setupWindow != nil && setupModel.recentlyVerified() {
+            action()
+            return
+        }
         guard let password = askForPassword(title: "Confirm with your login password", text: reason) else { return }
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = PasswordVerifier.verify(password)
             await MainActor.run {
                 guard let self else { return }
                 switch result {
-                case .valid: action()
+                case .valid:
+                    if self.setupWindow != nil { self.setupModel.verifiedAt = Date() }
+                    action()
                 case .invalid: self.alert("Incorrect password", "Nothing was changed.")
                 case .failed(let message): self.alert("Couldn't verify password", message)
                 }
@@ -267,6 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Turning it off never needs a password.
             Settings.isEnabled = false
             updateIcon()
+            refreshSetup()
             return
         }
         let problems = readyProblems
@@ -276,7 +301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         requireLoginPassword("Enter your Mac login password to turn on face unlock.") { [weak self] in
             Settings.isEnabled = true
+            self?.applyLaunchAtLoginDefault()
             self?.updateIcon()
+            self?.refreshSetup()
         }
     }
 
@@ -310,14 +337,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleLaunchAtLogin() {
+        setLaunchAtLogin(SMAppService.mainApp.status != .enabled)
+    }
+
+    private func setLaunchAtLogin(_ on: Bool) {
+        SetupStore.launchAtLoginChosen = true
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
+            if on {
                 try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
             }
+            setupModel.launchAtLoginNote = nil
         } catch {
-            alert("Launch at login", "Couldn't change the setting: \(error.localizedDescription)\n\nFaceUnlock must be in /Applications or ~/Applications.")
+            setupModel.launchAtLoginNote = "Couldn't change Launch at login: \(error.localizedDescription)"
+        }
+        refreshSetup()
+    }
+
+    /// Launch at login defaults to on when face unlock is first turned on,
+    /// unless the user has chosen otherwise.
+    private func applyLaunchAtLoginDefault() {
+        guard !SetupStore.launchAtLoginChosen, SMAppService.mainApp.status == .notRegistered else { return }
+        do {
+            try SMAppService.mainApp.register()
+        } catch {
+            setupModel.launchAtLoginNote = "Couldn't turn on Launch at login: \(error.localizedDescription)"
         }
     }
 
@@ -338,7 +383,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.templateDigest = nil
             self.integrity = nil
             self.coordinator.template = nil
+            SetupStore.testPassedForDigest = nil
             self.updateIcon()
+            self.refreshSetup()
         }
     }
 
@@ -378,11 +425,215 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: - Camera windows
+    /// Step 3: verifies and stores the password typed into the Setup window.
+    private func savePasswordFromSetup() {
+        let password = setupModel.passwordField
+        setupModel.passwordField = ""
+        guard !password.isEmpty, !setupModel.passwordBusy else { return }
+        setupModel.passwordBusy = true
+        setupModel.passwordError = nil
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = PasswordVerifier.verify(password)
+            var saveError: String?
+            if result == .valid {
+                do { try PasswordVault.savePassword(password) } catch { saveError = String(describing: error) }
+            }
+            await MainActor.run {
+                guard let self else { return }
+                let model = self.setupModel
+                model.passwordBusy = false
+                switch result {
+                case .valid where saveError == nil:
+                    model.verifiedAt = Date()
+                case .valid:
+                    model.passwordError = "Couldn't save to the Keychain: \(saveError ?? "")"
+                case .invalid:
+                    model.passwordError = "That isn't the login password for \(NSUserName())."
+                case .failed(let message):
+                    model.passwordError = "Couldn't verify the password: \(message)"
+                }
+                self.reloadKeychainState()
+            }
+        }
+    }
 
-    private func closeCameraWindows() {
-        enrolmentWindow?.close()
-        testWindow?.close()
+    // MARK: - Setup window
+
+    @objc private func openSetup() { showSetup() }
+
+    private func showSetup() {
+        if setupWindow == nil {
+            let controller = SetupWindowController(model: setupModel, session: camera.session, actions: setupActions) { [weak self] in
+                self?.setupWindowClosed()
+            }
+            setupWindow = controller
+            let timer = Timer(timeInterval: 1, repeats: true) { _ in
+                MainActor.assumeIsolated { [weak self] in self?.refreshSetup() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            setupTimer = timer
+        }
+        refreshSetup()
+        setupWindow?.show()
+    }
+
+    private func setupWindowClosed() {
+        stopCameraUse()
+        setupTimer?.invalidate()
+        setupTimer = nil
+        setupWindow = nil
+        setupModel.verifiedAt = nil
+        setupModel.passwordField = ""
+        setupModel.passwordError = nil
+        setupModel.lockCountdown = nil
+    }
+
+    private var setupActions: SetupActions {
+        SetupActions(
+            allowCamera: { [weak self] in
+                if Permissions.cameraStatus == .notDetermined {
+                    self?.requestCamera()
+                } else {
+                    Permissions.openPrivacyPane("Privacy_Camera")
+                }
+            },
+            openAccessibility: { [weak self] in self?.requestAccessibility() },
+            savePassword: { [weak self] in self?.savePasswordFromSetup() },
+            startEnrolment: { [weak self] in self?.enrol() },
+            stopEnrolment: { [weak self] in self?.stopEnrolment() },
+            startTest: { [weak self] in self?.testRecognition() },
+            stopTest: { [weak self] in self?.stopTest() },
+            setEnabled: { [weak self] on in
+                guard let self, on != Settings.isEnabled else { return }
+                self.toggleEnabled()
+            },
+            setLaunchAtLogin: { [weak self] on in self?.setLaunchAtLogin(on) },
+            lockNow: { [weak self] in self?.lockScreenWithCountdown() },
+            done: { [weak self] in self?.setupWindow?.close() }
+        )
+    }
+
+    /// Recomputes every step's state. Runs every second while Setup is open.
+    private func refreshSetup() {
+        let m = setupModel
+        var conditions: [SetupStep: StepCondition] = [:]
+        var details: [SetupStep: String] = [:]
+
+        switch Permissions.cameraStatus {
+        case .authorized:
+            conditions[.camera] = .done
+            details[.camera] = "Allowed. Only the Mac's built-in camera is used, and frames never leave this Mac."
+        case .notDetermined:
+            conditions[.camera] = .notDone
+            details[.camera] = "FaceUnlock needs the built-in camera to see your face."
+        default:
+            conditions[.camera] = .problem
+            details[.camera] = "Camera access was denied. Turn FaceUnlock on in System Settings › Privacy & Security › Camera."
+        }
+
+        if Permissions.accessibilityTrusted {
+            conditions[.accessibility] = .done
+            details[.accessibility] = "Allowed. Needed to type your password on the lock screen."
+        } else {
+            conditions[.accessibility] = .notDone
+            details[.accessibility] = "Turn FaceUnlock on in System Settings › Privacy & Security › Accessibility so it can type your password on the lock screen."
+        }
+
+        let stored = PasswordVault.passwordExists()
+        m.passwordStored = stored
+        if stored && passwordReadable {
+            conditions[.password] = .done
+            details[.password] = "Saved in your Keychain. Enter it again here if your login password changes."
+        } else if stored {
+            conditions[.password] = .problem
+            details[.password] = "The stored password can't be read without a prompt. Save it again."
+        } else {
+            conditions[.password] = .notDone
+            details[.password] = "Your Mac login password. It's checked now and stored only in your Keychain."
+        }
+
+        if let modelError {
+            conditions[.enrol] = .problem
+            details[.enrol] = "The face model failed to load: \(modelError)"
+        } else if template == nil {
+            conditions[.enrol] = .notDone
+            details[.enrol] = "Look at the camera and follow the prompts. Only numbers describing your face are saved, never images."
+        } else if let problem = integrityProblem {
+            conditions[.enrol] = integrityLoaded ? .problem : .notDone
+            details[.enrol] = problem
+        } else {
+            conditions[.enrol] = .done
+            details[.enrol] = "Enrolled. Re-enrol if you change your look or it struggles in some lighting."
+        }
+
+        let threshold = String(format: "%.2f", verifiedPolicy.threshold)
+        if let digest = templateDigest, SetupStore.testPassedForDigest == digest {
+            conditions[.test] = .done
+            details[.test] = "Passed: recognised you with a blink and head movement (threshold \(threshold))."
+        } else {
+            conditions[.test] = .notDone
+            details[.test] = "Check that it recognises you live: blink once and move your head a little until it says PASS (threshold \(threshold))."
+        }
+
+        let enabled = Settings.isEnabled
+        conditions[.turnOn] = enabled ? .done : .notDone
+        details[.turnOn] = enabled
+            ? "Face unlock is on."
+            : "Turn face unlock on. You'll be asked for your login password."
+        m.isEnabled = enabled
+        switch SMAppService.mainApp.status {
+        case .enabled:
+            m.launchAtLogin = true
+            m.launchAtLoginNote = nil
+        case .requiresApproval:
+            m.launchAtLogin = true
+            m.launchAtLoginNote = "Approve FaceUnlock in System Settings › General › Login Items."
+        default:
+            // Defaults to on until the user decides or face unlock is turned on.
+            m.launchAtLogin = !SetupStore.launchAtLoginChosen && !enabled
+        }
+
+        let last = SetupStore.lastAttempt
+        m.lastAttempt = last
+        if last?.outcome.isSuccess == true {
+            conditions[.lockTest] = .done
+            details[.lockTest] = "Face unlock worked at the real lock screen."
+        } else {
+            conditions[.lockTest] = last == nil ? .notDone : .problem
+            details[.lockTest] = "Lock the screen and let FaceUnlock unlock it, to confirm everything works end to end."
+        }
+
+        m.progress = SetupProgress(conditions: conditions)
+        m.details = details
+    }
+
+    private func lockScreenWithCountdown() {
+        guard setupModel.lockCountdown == nil else { return }
+        stopCameraUse()
+        setupModel.lockCountdown = 3
+        func tick() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, let count = self.setupModel.lockCountdown else { return }
+                    if count > 1 {
+                        self.setupModel.lockCountdown = count - 1
+                        tick()
+                    } else {
+                        self.setupModel.lockCountdown = nil
+                        ScreenLocker.lockNow()
+                    }
+                }
+            }
+        }
+        tick()
+    }
+
+    // MARK: - Inline camera steps (enrolment, test)
+
+    /// Stops any camera use by the Setup window (e.g. when the screen locks).
+    private func stopCameraUse() {
+        stopEnrolment()
+        stopTest()
     }
 
     /// Runs `body` once camera access is granted, asking only if undecided.
@@ -403,10 +654,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var cameraBusy: Bool {
-        enrolmentWindow != nil || testWindow != nil || coordinator.isAttempting
+        enrolmentRunner != nil || testProcessor != nil || coordinator.isAttempting
     }
 
     @objc private func enrol() {
+        showSetup()
         guard let analyzer, !cameraBusy else { return }
         let reason = template == nil
             ? "Enter your Mac login password to enrol your face."
@@ -435,15 +687,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in self?.finishEnrolment(embeddings, cameraID: cameraID, model: model) }
         })
         enrolmentRunner = runner
-        let window = CameraWindow(title: "Enrol face", size: NSSize(width: 520, height: 430),
-                                  content: EnrolmentView(session: camera.session, model: model)) { [weak self] in
-            self?.enrolmentRunner?.cancel()
-            self?.enrolmentRunner = nil
-            self?.enrolmentWindow = nil
-            self?.camera.stop()
-        }
-        enrolmentWindow = window
-        window.show()
+        setupModel.enrolment = model
         camera.start(device: device, handler: { pb, t in runner.process(pb, at: t) }, completion: { error in
             guard let error else { return }
             let message = String(describing: error)
@@ -453,6 +697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             MainActor.assumeIsolated {
                 guard let self, self.enrolmentRunner === runner, !model.finished else { return }
                 runner.cancel()
+                self.enrolmentRunner = nil
                 self.camera.stop()
                 model.failed = true
                 model.instruction = "Timed out"
@@ -461,7 +706,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Stops the camera and hides the inline enrolment.
+    private func stopEnrolment() {
+        guard enrolmentRunner != nil || setupModel.enrolment != nil else { return }
+        enrolmentRunner?.cancel()
+        enrolmentRunner = nil
+        setupModel.enrolment = nil
+        camera.stop()
+    }
+
     private func finishEnrolment(_ embeddings: [[Float]], cameraID: String, model: EnrolmentModel) {
+        enrolmentRunner = nil
         camera.stop()
         model.finished = true
         model.progress = 1
@@ -473,7 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             coordinator.template = cleaned
             try saveIntegrity()
             model.instruction = "Enrolled ✓"
-            model.detail = String(format: "%d samples kept, consistency %.2f. Use “Test recognition…” to check it.",
+            model.detail = String(format: "%d samples kept, consistency %.2f. Now test recognition below.",
                                   cleaned.samples.count, cleaned.consistency)
         } catch {
             model.failed = true
@@ -481,9 +736,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             model.detail = String(describing: error)
         }
         updateIcon()
+        refreshSetup()
     }
 
     @objc private func testRecognition() {
+        showSetup()
+        if let testProcessor {
+            // Already running: start a fresh evaluation.
+            setupModel.test?.passed = false
+            testProcessor.requestReset()
+            return
+        }
         guard let analyzer, let template, !cameraBusy else { return }
         withCameraAccess { [weak self] in self?.startTest(analyzer: analyzer, template: template) }
     }
@@ -497,27 +760,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let model = TestModel()
         let policy = verifiedPolicy
         model.threshold = policy.threshold
-        let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy, onReadout: { readout in
-            Task { @MainActor in model.apply(readout) }
+        let digest = templateDigest
+        let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy, onReadout: { [weak self] readout in
+            Task { @MainActor in
+                model.apply(readout)
+                if readout.snapshot.shouldUnlock, let digest, SetupStore.testPassedForDigest != digest {
+                    SetupStore.testPassedForDigest = digest
+                    self?.refreshSetup()
+                }
+            }
         }, stopsOnPass: false, onPass: {})
         testProcessor = processor
-        let view = TestView(session: camera.session, model: model) {
-            model.passed = false
-            processor.requestReset()
-        }
-        let window = CameraWindow(title: "Test recognition", size: NSSize(width: 520, height: 480), content: view) { [weak self] in
-            self?.testProcessor?.finish()
-            self?.testProcessor = nil
-            self?.testWindow = nil
-            self?.camera.stop()
-        }
-        testWindow = window
-        window.show()
+        setupModel.test = model
         camera.start(device: device, handler: { pb, t in processor.process(pb, at: t) }, completion: { error in
             guard let error else { return }
             let message = String(describing: error)
             Task { @MainActor in model.lines = ["Camera error: \(message)"] }
         })
+    }
+
+    private func stopTest() {
+        guard testProcessor != nil || setupModel.test != nil else { return }
+        testProcessor?.finish()
+        testProcessor = nil
+        setupModel.test = nil
+        camera.stop()
     }
 
     // MARK: - Helpers

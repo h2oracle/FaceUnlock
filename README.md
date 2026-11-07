@@ -37,6 +37,29 @@ lock screen).
 
 ## Set up
 
+FaceUnlock opens a **Setup** window on first launch (and whenever a required
+step is missing). It also opens when you launch the app again from Spotlight or
+Finder, and from **Setup…** at the top of the menu-bar menu. That's useful
+because the menu-bar icon can be hidden behind the notch. It walks
+through seven steps, ticking each one off live: Camera access → Accessibility
+→ Login password → Enrol face → Test recognition → Turn on (plus Launch at
+login, on by default) → Lock-screen test. Each step unlocks once the previous
+ones are done.
+
+The **lock-screen test** locks the screen after a 3-second countdown. Wait
+about 5 seconds, then move the mouse or press Shift and look at the camera.
+The outcome of every attempt at the lock screen is stored as a small record:
+time, result, and a reason such as no face, best score, no blink, or front
+window owner. It never contains the password. When you come back, the step
+explains what happened and what to do.
+
+Within one Setup session, a password you just verified (step 3 or any
+password prompt) is reused for 5 minutes, so you aren't asked again. Only a
+timestamp is kept.
+
+The individual steps, also available from the menu:
+
+
 1. **Set password…** – enter your Mac login password. It is verified with the
    OpenDirectory framework (in-process) and then stored only in your login
    Keychain (generic password, service `uk.co.sid.faceunlock`).
