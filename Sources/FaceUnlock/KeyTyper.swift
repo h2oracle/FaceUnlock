@@ -116,7 +116,7 @@ enum KeyTyper {
     }
 
     /// Clears the field, types `secret`, presses Return, checking safety
-    /// before each step. Blocking (~15 ms per character).
+    /// before each step. Blocking (~8 ms per character plus the checks).
     static func typeAndSubmit(_ secret: SecretUTF16, cancellation: TypingCancellation) throws {
         let source = CGEventSource(stateID: .hidSystemState)
         try ensureSafe(cancellation)
@@ -146,9 +146,9 @@ enum KeyTyper {
         down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
         up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
         down.post(tap: .cghidEventTap)
-        usleep(6_000)
+        usleep(3_000)
         up.post(tap: .cghidEventTap)
-        usleep(6_000)
+        usleep(4_000)
     }
 
     private static func postKey(_ key: CGKeyCode, flags: CGEventFlags, source: CGEventSource?) throws {
@@ -159,7 +159,7 @@ enum KeyTyper {
             }
             cmdDown.flags = .maskCommand
             cmdDown.post(tap: .cghidEventTap)
-            usleep(10_000)
+            usleep(5_000)
         }
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else {
@@ -168,16 +168,16 @@ enum KeyTyper {
         down.flags = flags
         up.flags = flags
         down.post(tap: .cghidEventTap)
-        usleep(10_000)
+        usleep(4_000)
         up.post(tap: .cghidEventTap)
-        usleep(10_000)
+        usleep(5_000)
         if withCommand {
             guard let cmdUp = CGEvent(keyboardEventSource: source, virtualKey: commandKey, keyDown: false) else {
                 throw TypingError.eventCreationFailed
             }
             cmdUp.flags = []
             cmdUp.post(tap: .cghidEventTap)
-            usleep(10_000)
+            usleep(5_000)
         }
     }
 }

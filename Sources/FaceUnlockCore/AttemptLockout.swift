@@ -1,51 +1,58 @@
 import Foundation
 
-/// Tracks failed face-unlock attempts within one screen-lock session.
-/// After `maximumFailures` failures, or `maximumAttempts` attempts of any
-/// kind, nothing more is tried until the session ends (the user unlocks
-/// manually), which calls `startNewLockSession()`.
+/// Limits face-unlock tries within one screen-lock session.
+///
+/// - A *failure* is a "failed look": a single face in view that doesn't
+///   match for a sustained period (frames with no face never count).
+/// - After `maximumFailures` failures, scanning stops until the display has
+///   gone to sleep and woken again (`displayWoke()`); input doesn't resume it.
+/// - After `maximumTotalFailures` failures in the whole lock session, or one
+///   typed password that didn't unlock, nothing more is tried until the user
+///   unlocks manually (`startNewLockSession()`).
 public struct AttemptLockout: Equatable, Sendable {
     public static let defaultMaximumFailures = 3
-    public static let defaultMaximumAttempts = 5
+    public static let defaultMaximumTotalFailures = 5
 
     public let maximumFailures: Int
-    /// Hard cap on attempts started per lock session, failed or not.
-    public let maximumAttempts: Int
+    public let maximumTotalFailures: Int
+    /// Failures since the last display wake.
     public private(set) var failures = 0
-    public private(set) var attemptsStarted = 0
-    /// Set when a typed password did not unlock the screen. Locks out
-    /// immediately: retyping a wrong password could trip account lockout.
+    /// Failures in this lock session.
+    public private(set) var totalFailures = 0
+    /// Set when a typed password did not unlock the screen (or couldn't be
+    /// typed). Retyping a wrong password could trip account lockout.
     public private(set) var passwordRejected = false
 
     public init(maximumFailures: Int = AttemptLockout.defaultMaximumFailures,
-                maximumAttempts: Int = AttemptLockout.defaultMaximumAttempts) {
+                maximumTotalFailures: Int = AttemptLockout.defaultMaximumTotalFailures) {
         self.maximumFailures = max(1, maximumFailures)
-        self.maximumAttempts = max(1, maximumAttempts)
+        self.maximumTotalFailures = max(self.maximumFailures, maximumTotalFailures)
     }
 
-    /// Blocks typing a password (checked again right before unlocking).
-    public var isLockedOut: Bool { passwordRejected || failures >= maximumFailures }
-    /// Blocks starting another attempt.
-    public var canStartAttempt: Bool { !isLockedOut && attemptsStarted < maximumAttempts }
-    public var remainingAttempts: Int {
-        canStartAttempt ? min(maximumFailures - failures, maximumAttempts - attemptsStarted) : 0
-    }
-
-    public mutating func recordAttemptStarted() {
-        attemptsStarted += 1
-    }
+    /// Stopped until the user unlocks manually.
+    public var isLockedOut: Bool { passwordRejected || totalFailures >= maximumTotalFailures }
+    /// Stopped until the display sleeps and wakes.
+    public var needsDisplayWake: Bool { failures >= maximumFailures }
+    public var canScan: Bool { !isLockedOut && !needsDisplayWake }
+    public var remainingBeforePause: Int { canScan ? min(maximumFailures - failures, maximumTotalFailures - totalFailures) : 0 }
 
     public mutating func recordFailure() {
         failures += 1
+        totalFailures += 1
     }
 
     public mutating func recordPasswordRejected() {
         passwordRejected = true
     }
 
+    /// The display went to sleep and woke again: a fresh set of looks.
+    public mutating func displayWoke() {
+        failures = 0
+    }
+
     public mutating func startNewLockSession() {
         failures = 0
-        attemptsStarted = 0
+        totalFailures = 0
         passwordRejected = false
     }
 }

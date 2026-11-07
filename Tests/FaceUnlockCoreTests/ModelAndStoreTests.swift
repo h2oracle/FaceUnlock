@@ -1,5 +1,7 @@
 import CoreGraphics
+import CoreImage
 import CoreML
+import CoreVideo
 import Foundation
 import ImageIO
 import Testing
@@ -30,6 +32,17 @@ import Testing
         #expect(embedding.count == FaceEmbedder.dimension)
         let cosine = VectorMath.cosine(embedding, reference.embedding)
         #expect(cosine > 0.98, "cosine to ONNX reference was \(cosine)")
+
+        // Fast path used for camera frames: render into a BGRA pixel buffer.
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 112, 112, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]] as CFDictionary, &buffer)
+        let pixelBuffer = try #require(buffer)
+        CIContext().render(CIImage(cgImage: image), to: pixelBuffer, bounds: CGRect(x: 0, y: 0, width: 112, height: 112),
+                           colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        let fast = try embedder.embedding(for: pixelBuffer)
+        let fastCosine = VectorMath.cosine(fast, reference.embedding)
+        #expect(fastCosine > 0.98, "pixel-buffer path cosine was \(fastCosine)")
     }
 }
 

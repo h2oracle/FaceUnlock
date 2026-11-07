@@ -34,7 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
-            analyzer = FaceAnalyzer(embedder: try FaceEmbedder())
+            let analyzer = FaceAnalyzer(embedder: try FaceEmbedder())
+            self.analyzer = analyzer
+            // Load Vision + Core ML now, on the camera's frame queue, so the
+            // first lock-screen frame isn't slowed by lazy initialisation.
+            camera.videoQueue.async { analyzer.prewarm() }
         } catch {
             modelError = String(describing: error)
             log.error("Face model failed to load: \(String(describing: error), privacy: .public)")
@@ -47,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator = UnlockCoordinator(camera: camera, analyzer: analyzer)
         coordinator.template = template
         coordinator.isEnabled = { Settings.isEnabled }
+        coordinator.startMode = { Settings.scanStartMode }
         // Note: `self?.integrityProblem ?? x` would flatten the String?? and turn
         // "no problem" (nil) into x — so unwrap self explicitly.
         coordinator.integrityProblem = { [weak self] in
@@ -134,6 +139,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let record, record.livenessMode == nil, !Settings.hasLivenessMode {
                     Settings.livenessMode = .blinkAndMovement
                 }
+                // Keep the threshold the record vouches for: the default for new
+                // set-ups changed (0.55 → 0.70) and must not silently apply here.
+                if let record, !Settings.hasMatchThreshold {
+                    Settings.matchThreshold = record.threshold
+                }
+                // Pre-liveness record: offer Natural movement (one-click,
+                // password-confirmed) instead of silently weakening the check.
+                self.setupModel.livenessProposal = (record != nil && record?.livenessMode == nil) ? .naturalMovement : nil
                 self.integrity = record
                 self.integrityLoaded = true
                 self.passwordReadable = readable
@@ -141,7 +154,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.refreshSetup()
                 if self.openSetupAfterFirstLoad {
                     self.openSetupAfterFirstLoad = false
-                    if !self.setupModel.progress.requiredComplete { self.showSetup() }
+                    if !self.setupModel.progress.requiredComplete || self.setupModel.livenessProposal != nil {
+                        self.showSetup()
+                    }
                 }
             }
         }
@@ -205,13 +220,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let strictness = NSMenuItem(title: "Match strictness", action: nil, keyEquivalent: "")
         let sub = NSMenu()
         let current = Settings.matchThreshold
-        for (label, value) in [("Relaxed (0.45)", Float(0.45)), ("Standard (0.55)", 0.55), ("Strict (0.65)", 0.65)] {
+        for (label, value) in [("Relaxed (0.55)", Float(0.55)), ("Standard (0.70)", 0.70), ("Strict (0.80)", 0.80)] {
             let choice = item(label, #selector(setThreshold(_:)))
             choice.representedObject = NSNumber(value: value)
             choice.state = abs(current - value) < 0.001 ? .on : .off
             sub.addItem(choice)
         }
-        if ![Float(0.45), 0.55, 0.65].contains(where: { abs($0 - current) < 0.001 }) {
+        if ![Float(0.55), 0.70, 0.80].contains(where: { abs($0 - current) < 0.001 }) {
             let custom = NSMenuItem(title: String(format: "Custom (%.2f)", current), action: nil, keyEquivalent: "")
             custom.state = .on
             custom.isEnabled = false
@@ -231,6 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         livenessItem.submenu = livenessMenu
         menu.addItem(livenessItem)
+
+        let scanItem = NSMenuItem(title: "Start scanning", action: nil, keyEquivalent: "")
+        let scanMenu = NSMenu()
+        for mode in ScanStartMode.allCases {
+            let choice = item(mode.title, #selector(chooseScanStart(_:)))
+            choice.representedObject = mode.rawValue
+            choice.state = Settings.scanStartMode == mode ? .on : .off
+            scanMenu.addItem(choice)
+        }
+        scanItem.submenu = scanMenu
+        menu.addItem(scanItem)
         menu.addItem(.separator())
 
         switch Permissions.cameraStatus {
@@ -354,6 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
             }
+            self.setupModel.livenessProposal = nil
             // The test result was for the old mode; a running test uses it too.
             SetupStore.testPassedForDigest = nil
             self.stopTest()
@@ -362,9 +389,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func chooseScanStart(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = ScanStartMode(rawValue: raw) else { return }
+        setScanStart(mode)
+    }
+
+    /// Not password-gated: it changes when the camera runs, not how strict
+    /// matching is. Takes effect at the next screen lock.
+    private func setScanStart(_ mode: ScanStartMode) {
+        Settings.scanStartMode = mode
+        refreshSetup()
+    }
+
     @objc private func setThreshold(_ sender: NSMenuItem) {
         guard let value = (sender.representedObject as? NSNumber)?.floatValue else { return }
-        requireLoginPassword("Enter your Mac login password to change the match strictness.") { [weak self] in
+        applyThreshold(value)
+    }
+
+    /// Password-gated, and recorded in the Keychain integrity item.
+    private func applyThreshold(_ value: Float) {
+        requireLoginPassword(String(format: "Enter your Mac login password to change the match threshold to %.2f.", value)) { [weak self] in
             guard let self else { return }
             Settings.matchThreshold = value
             do {
@@ -372,8 +416,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
             }
+            // A running test uses the old threshold.
+            self.stopTest()
             self.updateIcon()
+            self.refreshSetup()
         }
+    }
+
+    /// Keeps Blink + movement and writes it explicitly into the Keychain record.
+    private func keepBlinkLiveness() {
+        Settings.livenessMode = .blinkAndMovement
+        do {
+            try saveIntegrity()
+            setupModel.livenessProposal = nil
+        } catch {
+            alert("Couldn't save setting", String(describing: error))
+        }
+        refreshSetup()
     }
 
     @objc private func requestCamera() {
@@ -564,6 +623,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             },
             setLaunchAtLogin: { [weak self] on in self?.setLaunchAtLogin(on) },
             setLiveness: { [weak self] mode in self?.setLiveness(mode) },
+            keepBlinkLiveness: { [weak self] in self?.keepBlinkLiveness() },
+            setScanStart: { [weak self] mode in self?.setScanStart(mode) },
+            applyThreshold: { [weak self] value in self?.applyThreshold(value) },
             lockNow: { [weak self] in self?.lockScreenWithCountdown() },
             done: { [weak self] in self?.setupWindow?.close() }
         )
@@ -623,6 +685,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         m.livenessMode = Settings.livenessMode
+        m.scanStartMode = Settings.scanStartMode
+        m.threshold = verifiedPolicy.threshold
         let threshold = String(format: "%.2f", verifiedPolicy.threshold)
         if let digest = templateDigest, SetupStore.testPassedForDigest == digest {
             conditions[.test] = .done
@@ -828,6 +892,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                              liveness: verifiedLiveness, onReadout: { [weak self] readout in
             Task { @MainActor in
                 model.apply(readout)
+                if let typical = model.typicalScore { self?.setupModel.typicalScore = typical }
                 if readout.snapshot.shouldUnlock, let digest, SetupStore.testPassedForDigest != digest {
                     SetupStore.testPassedForDigest = digest
                     self?.refreshSetup()

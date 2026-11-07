@@ -31,8 +31,10 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private let lock = NSLock()
     private var handler: FrameHandler?
     private var lastFrameTime: TimeInterval = 0
-    /// Frames beyond this rate are dropped before any processing.
-    private let maximumFPS: Double = 15
+    /// Frames beyond this rate are dropped before any processing. Frames
+    /// that arrive while the previous one is still being processed are
+    /// dropped by AVFoundation (`alwaysDiscardsLateVideoFrames`), never queued.
+    private let maximumFPS: Double = 31
 
     /// Built-in Apple cameras only: no external/USB, Continuity (iPhone),
     /// Desk View or virtual (software) cameras.
@@ -73,6 +75,14 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
         session.addInput(input)
         currentInput = input
+        // Allow up to 30 fps (auto-exposure may still lower it in dim light).
+        if (try? device.lockForConfiguration()) != nil {
+            let wanted = CMTime(value: 1, timescale: 30)
+            if device.activeFormat.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameDuration >= wanted && $0.minFrameDuration <= wanted }) {
+                device.activeVideoMinFrameDuration = wanted
+            }
+            device.unlockForConfiguration()
+        }
         if !configured {
             output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
             output.alwaysDiscardsLateVideoFrames = true
@@ -109,6 +119,14 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 completion(error)
             }
         }
+    }
+
+    /// Configures inputs/outputs for `device` without starting the camera
+    /// (no camera light), so a later `start` only has to call startRunning.
+    func prepare(device: AVCaptureDevice) {
+        guard Permissions.cameraAuthorized, Self.isAllowed(device) else { return }
+        nonisolated(unsafe) let device = device
+        sessionQueue.async { [self] in try? configure(device: device) }
     }
 
     /// Stops the camera (the green light goes off) and detaches the handler.

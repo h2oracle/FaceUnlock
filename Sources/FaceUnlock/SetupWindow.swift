@@ -25,6 +25,18 @@ final class SetupModel {
     var launchAtLoginNote: String?
 
     var livenessMode: LivenessMode = .default
+    /// Set when the Keychain record predates the liveness setting.
+    var livenessProposal: LivenessMode?
+    var scanStartMode: ScanStartMode = .automatic
+    var threshold: Float = MatchPolicy.defaultThreshold
+    /// Median score of the user's matching frames in the Test step.
+    var typicalScore: Float?
+
+    /// Suggests the stricter default when the user's own scores are high.
+    var thresholdSuggestion: Float? {
+        guard let typicalScore, typicalScore >= 0.80, threshold < MatchPolicy.defaultThreshold - 0.001 else { return nil }
+        return MatchPolicy.defaultThreshold
+    }
 
     var lockCountdown: Int?
     var lastAttempt: AttemptRecord?
@@ -54,6 +66,9 @@ struct SetupActions {
     var setEnabled: (Bool) -> Void
     var setLaunchAtLogin: (Bool) -> Void
     var setLiveness: (LivenessMode) -> Void
+    var keepBlinkLiveness: () -> Void
+    var setScanStart: (ScanStartMode) -> Void
+    var applyThreshold: (Float) -> Void
     var lockNow: () -> Void
     var done: () -> Void
 }
@@ -95,6 +110,21 @@ struct SetupView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        if let proposal = model.livenessProposal {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("New: unlock without blinking", systemImage: "sparkles").font(.headline)
+                Text("FaceUnlock can now check for the natural movement of a live face instead of waiting for a blink, which makes unlocking much faster. \(proposal.securityNote)")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Switch to \(proposal.title)…") { actions.setLiveness(proposal) }
+                        .keyboardShortcut(.defaultAction)
+                    Button("Keep Blink + movement", action: actions.keepBlinkLiveness)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+        }
         if model.progress.allComplete {
             Banner(symbol: "checkmark.seal.fill", tint: .green, text: "Setup complete ✓  Face unlock is on and has unlocked this Mac.")
         } else if model.progress.requiredComplete {
@@ -133,6 +163,15 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Toggle("Face unlock enabled", isOn: Binding(get: { model.isEnabled }, set: { actions.setEnabled($0) }))
                 Toggle("Launch at login", isOn: Binding(get: { model.launchAtLogin }, set: { actions.setLaunchAtLogin($0) }))
+                Picker("Start scanning", selection: Binding(get: { model.scanStartMode }, set: { actions.setScanStart($0) })) {
+                    ForEach(ScanStartMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .frame(width: 460)
+                Text(model.scanStartMode == .automatic
+                     ? "The camera (and its green light) is on whenever the lock screen is showing; macOS turns the display off at the lock screen after a short time."
+                     : "Move the mouse or press a key at the lock screen to start the camera.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let note = model.launchAtLoginNote {
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }
@@ -179,6 +218,15 @@ struct SetupView: View {
             .pickerStyle(.segmented)
             .frame(width: 420)
             Text(model.livenessMode.securityNote).font(.caption).foregroundStyle(.secondary)
+            if let suggested = model.thresholdSuggestion, let typical = model.typicalScore {
+                HStack {
+                    Text(String(format: "Your scores are ~%.2f – a stricter threshold of %.2f is recommended (now %.2f).",
+                                typical, suggested, model.threshold))
+                        .font(.callout)
+                    Button(String(format: "Use %.2f…", suggested)) { actions.applyThreshold(suggested) }
+                }
+                .padding(.top, 4)
+            }
         }
         if let test = model.test {
             TestView(session: session, model: test, reset: {
@@ -212,9 +260,10 @@ struct SetupView: View {
                 Button("Lock screen now", action: actions.lockNow)
             }
         }
-        Text(model.livenessMode == .blinkAndMovement
-            ? "After the screen locks, wait about 5 seconds, then move the mouse or press Shift and look at the camera. Blink once."
-            : "After the screen locks, wait about 5 seconds, then move the mouse or press Shift and look at the camera.")
+        Text((model.scanStartMode == .automatic
+              ? "After the screen locks, just look at the camera."
+              : "After the screen locks, move the mouse or press Shift and look at the camera.")
+             + (model.livenessMode == .blinkAndMovement ? " Blink once." : ""))
             .font(.caption).foregroundStyle(.secondary)
     }
 }

@@ -1,50 +1,75 @@
 import AppKit
 import SwiftUI
 
-/// A small Face ID-style indicator shown on the lock screen while an attempt
-/// runs: scanning ring, filling progress ring, green tick on a match, and a
-/// short "Face not recognised" on failure.
+/// An iPhone Face ID-style HUD shown on the lock screen while scanning:
+/// a frosted rounded square with a pulsing face glyph ("Looking for you…"),
+/// a drawn circle + checkmark on a match, and a shake with "Face Not
+/// Recognised" on a failed look.
 ///
 /// Purely cosmetic and fail-safe: every step is best effort, nothing here can
 /// block or delay unlocking, and the panel never takes focus, keys or clicks
 /// (the lock screen's password field keeps keyboard focus).
 @MainActor
 final class LockOverlay {
-    private let model = OverlayModel()
+    private let model = HUDModel()
     private var panel: OverlayPanel?
     private var delegatedToLockScreen = false
-    private var hideWork: DispatchWorkItem?
+    private var pending: DispatchWorkItem?
 
     func showScanning() {
-        hideWork?.cancel()
+        cancelPending()
         model.phase = .scanning
-        model.progress = 0
+        model.visible = true
         present()
     }
 
-    func update(progress: Double) {
-        guard model.phase == .scanning else { return }
-        model.progress = max(0, min(1, progress))
+    /// Fades the HUD out (e.g. nobody in view) or back in.
+    func setVisible(_ visible: Bool) {
+        guard model.phase == .scanning, model.visible != visible else { return }
+        model.visible = visible
     }
 
+    /// Match: circle + checkmark draw in; typing runs in parallel.
     func showSuccess() {
-        hideWork?.cancel()
+        cancelPending()
+        model.visible = true
         model.phase = .success
-        model.progress = 1
         present()
-        scheduleHide(after: 2)
+        after(1.6) { $0.hide() }
     }
 
-    func showFailure() {
-        hideWork?.cancel()
+    /// A failed look while scanning continues: shake, caption, back to scanning.
+    func flashFailure() {
+        cancelPending()
+        model.visible = true
         model.phase = .failure
         present()
-        scheduleHide(after: 1.6)
+        after(1.3) { overlay in
+            guard overlay.model.phase == .failure else { return }
+            overlay.model.phase = .scanning
+        }
+    }
+
+    func flashFailureAndHide() {
+        cancelPending()
+        model.visible = true
+        model.phase = .failure
+        present()
+        after(1.5) { $0.hide() }
+    }
+
+    /// Scanning has stopped after too many failed looks.
+    func showStopped() {
+        cancelPending()
+        model.visible = true
+        model.phase = .stopped
+        present()
+        after(4) { $0.hide() }
     }
 
     func hide() {
-        hideWork?.cancel()
-        hideWork = nil
+        cancelPending()
+        model.visible = false
         guard let panel else { return }
         if delegatedToLockScreen {
             LockScreenSpace.shared?.remove(panel)
@@ -53,24 +78,33 @@ final class LockOverlay {
         panel.orderOut(nil)
     }
 
-    private func scheduleHide(after seconds: TimeInterval) {
+    private func cancelPending() {
+        pending?.cancel()
+        pending = nil
+    }
+
+    private func after(_ seconds: TimeInterval, _ body: @escaping @MainActor (LockOverlay) -> Void) {
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.hide() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                body(self)
+            }
         }
-        hideWork = work
+        pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
+
+    private static let panelSize = NSSize(width: 220, height: 220)
 
     private func present() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let panel = self.panel ?? makePanel()
         self.panel = panel
-        let size = panel.frame.size
-        // Centred horizontally, above the lock screen's user picture and
-        // password field (which sit in the lower part of the screen).
+        // Same spot as before: centred horizontally, its centre at ~42 % of
+        // the screen height + 80 pt (above the user picture and password field).
         let frame = screen.frame
-        let origin = NSPoint(x: frame.midX - size.width / 2, y: frame.minY + frame.height * 0.42)
-        panel.setFrameOrigin(origin)
+        let center = NSPoint(x: frame.midX, y: frame.minY + frame.height * 0.42 + 80)
+        panel.setFrameOrigin(NSPoint(x: center.x - Self.panelSize.width / 2, y: center.y - Self.panelSize.height / 2))
         panel.orderFrontRegardless()
         if !delegatedToLockScreen, SessionState.current().screenLocked, let space = LockScreenSpace.shared {
             space.add(panel)
@@ -79,7 +113,7 @@ final class LockOverlay {
     }
 
     private func makePanel() -> OverlayPanel {
-        let panel = OverlayPanel(contentRect: NSRect(x: 0, y: 0, width: 240, height: 160),
+        let panel = OverlayPanel(contentRect: NSRect(origin: .zero, size: Self.panelSize),
                                  styleMask: [.borderless, .nonactivatingPanel],
                                  backing: .buffered, defer: false)
         panel.isOpaque = false
@@ -90,11 +124,12 @@ final class LockOverlay {
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = true
         panel.becomesKeyOnlyIfNeeded = true
+        panel.appearance = NSAppearance(named: .darkAqua)
         // Above the lock screen's shielding window.
         panel.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         panel.canBecomeVisibleWithoutLogin = true
-        let host = NSHostingView(rootView: OverlayView(model: model))
+        let host = NSHostingView(rootView: HUDView(model: model))
         host.sizingOptions = []
         panel.contentView = host
         return panel
@@ -109,51 +144,136 @@ private final class OverlayPanel: NSPanel {
 
 @MainActor
 @Observable
-private final class OverlayModel {
-    enum Phase { case scanning, success, failure }
+private final class HUDModel {
+    enum Phase { case scanning, success, failure, stopped }
     var phase: Phase = .scanning
-    var progress = 0.0
+    var visible = false
 }
 
-private struct OverlayView: View {
-    let model: OverlayModel
+/// Frosted HUD background (.hudWindow material, dark, rounded corners).
+private struct HUDBackground: NSViewRepresentable {
+    let cornerRadius: CGFloat
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .hudWindow
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.appearance = NSAppearance(named: .darkAqua)
+        view.maskImage = Self.mask(radius: cornerRadius)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+
+    /// Resizable rounded-rect mask (the standard way to round a visual effect view).
+    private static func mask(radius: CGFloat) -> NSImage {
+        let edge = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }
+}
+
+private struct CheckmarkShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX + rect.width * 0.28, y: rect.minY + rect.height * 0.52))
+        p.addLine(to: CGPoint(x: rect.minX + rect.width * 0.44, y: rect.minY + rect.height * 0.67))
+        p.addLine(to: CGPoint(x: rect.minX + rect.width * 0.73, y: rect.minY + rect.height * 0.36))
+        return p
+    }
+}
+
+/// Horizontal wrong-passcode shake.
+private struct Shake: GeometryEffect {
+    var travel: CGFloat = 9
+    var animatableData: CGFloat
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(CGAffineTransform(translationX: travel * sin(animatableData * .pi * 6), y: 0))
+    }
+}
+
+private struct HUDView: View {
+    let model: HUDModel
+    @State private var circle: CGFloat = 0
+    @State private var check: CGFloat = 0
+    @State private var bounce: CGFloat = 1
+    @State private var shake: CGFloat = 0
+
+    private let green = Color(red: 0.2, green: 0.85, blue: 0.4)
 
     var body: some View {
-        VStack(spacing: 10) {
-            ZStack {
-                Circle().fill(.ultraThinMaterial)
-                switch model.phase {
-                case .scanning:
-                    Circle().stroke(.white.opacity(0.25), lineWidth: 4)
+        ZStack {
+            HUDBackground(cornerRadius: 28)
+            VStack(spacing: 10) {
+                ZStack {
+                    Image(systemName: "faceid")
+                        .font(.system(size: 72, weight: .light))
+                        .foregroundStyle(.white)
+                        .symbolEffect(.pulse, options: .repeating, isActive: model.phase == .scanning)
+                        .opacity(model.phase == .success ? 0 : 1)
+                        .scaleEffect(model.phase == .success ? 0.6 : 1)
+                        .modifier(Shake(animatableData: shake))
                     Circle()
-                        .trim(from: 0, to: max(0.02, model.progress))
-                        .stroke(.white, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                        .trim(from: 0, to: circle)
+                        .stroke(green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                         .rotationEffect(.degrees(-90))
-                        .animation(.easeOut(duration: 0.25), value: model.progress)
-                    TimelineView(.animation) { context in
-                        let angle = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2 * 360
-                        Circle()
-                            .trim(from: 0, to: 0.15)
-                            .stroke(.white.opacity(0.7), style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                            .padding(9)
-                            .rotationEffect(.degrees(angle))
-                    }
-                    Image(systemName: "faceid").font(.system(size: 34, weight: .light)).foregroundStyle(.white)
-                case .success:
-                    Circle().stroke(.green, lineWidth: 4)
-                    Image(systemName: "checkmark").font(.system(size: 36, weight: .semibold)).foregroundStyle(.green)
-                case .failure:
-                    Circle().stroke(.white.opacity(0.4), lineWidth: 4)
-                    Image(systemName: "faceid").font(.system(size: 34, weight: .light)).foregroundStyle(.white.opacity(0.8))
+                        .frame(width: 76, height: 76)
+                    CheckmarkShape()
+                        .trim(from: 0, to: check)
+                        .stroke(green, style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
+                        .frame(width: 76, height: 76)
                 }
+                .frame(width: 84, height: 84)
+                .scaleEffect(bounce)
+                Text(caption)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .frame(height: 30)
             }
-            .frame(width: 88, height: 88)
-            Text(model.phase == .failure ? "Face not recognised" : " ")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.white)
-                .shadow(radius: 3)
+            .padding(.top, 12)
         }
-        .frame(width: 240, height: 160)
+        .frame(width: 160, height: 160)
+        .frame(width: 220, height: 220)
+        .opacity(model.visible ? 1 : 0)
+        .animation(.easeInOut(duration: 0.35), value: model.visible)
+        .animation(.easeOut(duration: 0.15), value: model.phase)
+        .task(id: model.phase) { await run(model.phase) }
+    }
+
+    private var caption: String {
+        switch model.phase {
+        case .scanning: return "Looking for you…"
+        case .success: return ""
+        case .failure: return "Face Not Recognised"
+        case .stopped: return "Face Not Recognised\nUse your password"
+        }
+    }
+
+    private func run(_ phase: HUDModel.Phase) async {
+        switch phase {
+        case .success:
+            circle = 0; check = 0; bounce = 1
+            withAnimation(.easeOut(duration: 0.2)) { circle = 1 }
+            try? await Task.sleep(for: .milliseconds(170))
+            withAnimation(.easeOut(duration: 0.17)) { check = 1 }
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.45)) { bounce = 1.08 }
+            try? await Task.sleep(for: .milliseconds(160))
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { bounce = 1 }
+        case .failure, .stopped:
+            circle = 0; check = 0; bounce = 1
+            shake = 0
+            withAnimation(.linear(duration: 0.45)) { shake = 1 }
+        case .scanning:
+            circle = 0; check = 0; bounce = 1; shake = 0
+        }
     }
 }
 

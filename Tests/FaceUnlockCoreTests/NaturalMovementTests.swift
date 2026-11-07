@@ -41,11 +41,40 @@ private func movingPhoto(_ i: Int) -> FrameObservation {
         return nil
     }
 
-    @Test func personSittingNormallyPassesWithinTwoSeconds() throws {
+    @Test func personSittingNormallyPassesWithinAboutOneSecond() throws {
         let i = try #require(firstUnlock(live, mode: .naturalMovement))
         let seconds = Double(i) / 15
-        #expect(seconds >= 1.0)
-        #expect(seconds <= 2.0)
+        #expect(seconds >= 0.5)
+        #expect(seconds <= 1.2)
+    }
+
+    @Test func stillPhotoFailsEvenOverLongWindows() {
+        // 10 s of a still photo, at both 15 and 30 fps.
+        #expect(firstUnlock(stillPhoto, mode: .naturalMovement, frames: 150) == nil)
+        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
+        for i in 0..<300 {
+            let t = Double(i) / 30
+            let f = FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.9, bestSample: 0.9),
+                                     eyes: EyeSample(time: t, left: 0.1 + (i % 2 == 0 ? 0.0002 : -0.0002),
+                                                     right: 0.1, faceShape: 1.2, pitch: 0),
+                                     yawDegrees: i % 2 == 0 ? 0.05 : -0.05, pitchDegrees: 0)
+            #expect(!e.observe(f).shouldUnlock)
+        }
+    }
+
+    @Test func passIsTiedToDurationNotFrameCount() {
+        // At 30 fps, 0.3 s of perfect movement is 9+ frames but still too short.
+        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
+        var unlockedAt: Double?
+        for i in 0..<60 where unlockedAt == nil {
+            let t = Double(i) / 30
+            let eye = 0.10 * (1 + (i % 2 == 0 ? 0.04 : -0.04))
+            let f = FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.9, bestSample: 0.9),
+                                     eyes: EyeSample(time: t, left: eye, right: eye, faceShape: 1.2, pitch: 0),
+                                     yawDegrees: 2 * sin(t * 6), pitchDegrees: 0)
+            if e.observe(f).shouldUnlock { unlockedAt = t }
+        }
+        #expect((unlockedAt ?? 0) >= 0.5)
     }
 
     @Test func stillPhotoFails() {
@@ -84,7 +113,7 @@ private func movingPhoto(_ i: Int) -> FrameObservation {
         for i in 15..<80 where unlockedAt == nil {
             if e.observe(live(i)).shouldUnlock { unlockedAt = i }
         }
-        #expect((unlockedAt ?? 0) >= 15 + 15)
+        #expect((unlockedAt ?? 0) >= 15 + 7)
     }
 
     @Test func progressRisesTowardsOne() {

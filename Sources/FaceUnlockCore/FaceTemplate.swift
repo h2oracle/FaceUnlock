@@ -83,8 +83,9 @@ public struct MatchPolicy: Equatable, Sendable {
     public static let thresholdRange: ClosedRange<Float> = 0.30...0.90
     /// Default for SFace embeddings. OpenCV's published single-pair SFace
     /// threshold is 0.363; comparing against an averaged template gives
-    /// genuine users noticeably higher scores, so 0.55 errs on the strict side.
-    public static let defaultThreshold: Float = 0.55
+    /// genuine users much higher scores (≈0.9 in practice), so 0.70 is a
+    /// strict default that still leaves headroom.
+    public static let defaultThreshold: Float = 0.70
     public static let defaultRequiredConsecutive = 3
 
     public var threshold: Float

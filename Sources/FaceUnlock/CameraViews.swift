@@ -101,6 +101,19 @@ final class TestModel {
     var lines: [String] = ["Starting camera…"]
     var passed = false
     var threshold: Float = MatchPolicy.defaultThreshold
+    private var recentScores: [Float] = []
+
+    /// Median centroid score of recent frames with a single, matching face.
+    var typicalScore: Float? {
+        guard recentScores.count >= 10 else { return nil }
+        let sorted = recentScores.sorted()
+        return sorted[sorted.count / 2]
+    }
+
+    func noteScore(_ score: Float) {
+        recentScores.append(score)
+        if recentScores.count > 60 { recentScores.removeFirst(recentScores.count - 60) }
+    }
 }
 
 struct TestView: View {
@@ -142,6 +155,7 @@ struct TestView: View {
 extension TestModel {
     func apply(_ r: LiveReadout) {
         let s = r.snapshot
+        if s.faceCount == 1, s.frameMatched, let score = s.score { noteScore(score.centroid) }
         var lines: [String] = []
         lines.append("Faces in frame:     \(s.faceCount)\(s.faceCount > 1 ? "  (only one allowed)" : "")")
         if let score = s.score {

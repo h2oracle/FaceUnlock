@@ -73,55 +73,44 @@ import Testing
 }
 
 @Suite struct AttemptLockoutTests {
-    @Test func locksOutAfterThreeFailures() {
+    @Test func threeFailedLooksPauseUntilDisplayWake() {
         var l = AttemptLockout()
-        #expect(l.remainingAttempts == 3)
+        #expect(l.canScan)
         l.recordFailure(); l.recordFailure()
-        #expect(!l.isLockedOut)
-        #expect(l.remainingAttempts == 1)
+        #expect(l.canScan)
+        #expect(l.remainingBeforePause == 1)
         l.recordFailure()
-        #expect(l.isLockedOut)
-        #expect(l.remainingAttempts == 0)
-        l.recordFailure()
-        #expect(l.isLockedOut)
+        #expect(l.needsDisplayWake)
+        #expect(!l.canScan)
+        #expect(!l.isLockedOut) // only paused, not locked out for the session
+        l.displayWoke()
+        #expect(l.canScan)
+        #expect(l.totalFailures == 3)
     }
 
-    @Test func newLockSessionResets() {
+    @Test func hardCapOfFiveFailuresPerLockSession() {
         var l = AttemptLockout()
         for _ in 0..<3 { l.recordFailure() }
+        l.displayWoke()
+        l.recordFailure(); l.recordFailure()
+        #expect(l.isLockedOut)
+        #expect(!l.canScan)
+        l.displayWoke() // a wake doesn't lift the hard cap
+        #expect(!l.canScan)
         l.startNewLockSession()
-        #expect(!l.isLockedOut)
-        #expect(l.failures == 0)
-    }
-
-    @Test func hardCapOfFiveAttemptsPerLockSession() {
-        var l = AttemptLockout()
-        for _ in 0..<5 {
-            #expect(l.canStartAttempt)
-            l.recordAttemptStarted()
-        }
-        // No failures recorded (e.g. no face seen), but the cap still applies.
-        #expect(!l.canStartAttempt)
-        #expect(!l.isLockedOut) // a match in the 5th attempt may still type
-        #expect(l.remainingAttempts == 0)
-        l.startNewLockSession()
-        #expect(l.canStartAttempt)
-        #expect(l.attemptsStarted == 0)
-    }
-
-    @Test func failuresStopNewAttempts() {
-        var l = AttemptLockout()
-        for _ in 0..<3 { l.recordAttemptStarted(); l.recordFailure() }
-        #expect(!l.canStartAttempt)
+        #expect(l.canScan)
+        #expect(l.totalFailures == 0)
     }
 
     @Test func rejectedPasswordLocksOutImmediately() {
         var l = AttemptLockout()
         l.recordPasswordRejected()
         #expect(l.isLockedOut)
-        #expect(!l.canStartAttempt)
+        #expect(!l.canScan)
+        l.displayWoke()
+        #expect(!l.canScan)
         l.startNewLockSession()
-        #expect(!l.isLockedOut)
+        #expect(l.canScan)
     }
 }
 

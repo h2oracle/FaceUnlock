@@ -49,6 +49,24 @@ public final class FaceEmbedder: @unchecked Sendable {
             pixelFormatType: kCVPixelFormatType_32BGRA,
             options: nil
         )
+        return try embedding(input: input)
+    }
+
+    /// Faster path: a 112×112 32BGRA pixel buffer (no CGImage conversion).
+    public func embedding(for pixelBuffer: CVPixelBuffer) throws -> [Float] {
+        try embedding(input: MLFeatureValue(pixelBuffer: pixelBuffer))
+    }
+
+    /// Runs one throw-away inference so the first real frame doesn't pay
+    /// for Core ML's lazy model loading / Neural Engine set-up.
+    public func prewarm() {
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, Self.inputSize, Self.inputSize, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]] as CFDictionary, &buffer)
+        if let buffer { _ = try? embedding(for: buffer) }
+    }
+
+    private func embedding(input: MLFeatureValue) throws -> [Float] {
         let provider = try MLDictionaryFeatureProvider(dictionary: ["image": input])
         let output: MLFeatureProvider = try lock.withLock { try model.prediction(from: provider) }
         guard let array = output.featureValue(for: "embedding")?.multiArrayValue else {

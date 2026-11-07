@@ -3,40 +3,41 @@ import AppKit
 import FaceUnlockCore
 import Foundation
 
-/// Watches for screen lock / wake and runs short, bounded face-unlock
-/// attempts while the screen of this (already logged-in) session is locked.
+/// Watches the screen-lock state and scans for the owner's face while the
+/// lock screen of this (already logged-in) session is showing.
+///
+/// Start modes (`ScanStartMode`):
+/// - automatic (default): the camera scans continuously while the session is
+///   locked and the display is awake, starting 1 s after locking and on every
+///   display wake / lid opening. No input needed.
+/// - on input: scanning starts on a mouse move or key press and runs for at
+///   most `onInputScanDuration`.
 ///
 /// Safety rules enforced here:
 /// - Only acts on a lock of a session that this process has seen unlocked,
 ///   i.e. never at boot, FileVault or the login window (the app isn't even
 ///   running there) and never for another user's console session.
-/// - Attempts start only on a wake that came with user input or a lid
-///   opening, or on user input while locked; never in the first seconds
-///   after locking.
-/// - Camera runs at most `attemptDuration` seconds per attempt, and only the
-///   built-in camera recorded at enrolment is used.
-/// - After `AttemptLockout.maximumFailures` failed attempts,
-///   `AttemptLockout.maximumAttempts` attempts in total, or one typed
-///   password that didn't unlock, nothing is tried until a manual unlock.
+/// - Nothing happens in the first second after locking, so the lock
+///   keystroke itself can't start a scan.
+/// - Only the built-in camera recorded at enrolment is used.
+/// - A "failed look" (one face in view that keeps not matching for ~2 s) is a
+///   failure. After 3, scanning stops until the display sleeps and wakes;
+///   after 5 in the lock session, or one typed password that didn't unlock,
+///   nothing is tried until a manual unlock. Frames without a face never
+///   count. After 60 s without any face the camera pauses until input/wake.
 /// - Typing re-checks the lock state and the lock-screen window before
 ///   every key and is cancelled on sleep or when the lock session ends.
 @MainActor
 final class UnlockCoordinator {
-    static let attemptDuration: TimeInterval = 10
-    /// Input right after locking (e.g. the lock shortcut itself) must not
-    /// immediately unlock again.
-    static let gracePeriodAfterLock: TimeInterval = 5
-    /// Gap between the end of one attempt and an activity-triggered retry.
-    static let retryCooldown: TimeInterval = 3
+    static let gracePeriodAfterLock: TimeInterval = 1
+    static let onInputScanDuration: TimeInterval = 10
     /// How long to wait for the screen to unlock after typing.
     static let unlockConfirmTimeout: TimeInterval = 6
-    /// "Recent" user input for activity triggers.
-    static let recentInput: TimeInterval = 1.5
-    /// Wake handling runs `wakeSettleDelay` after the wake, so the input
-    /// that caused it may be that much older.
-    static let wakeSettleDelay: TimeInterval = 0.7
-    /// A lid opening counts as a wake trigger for this long.
-    static let lidOpenWindow: TimeInterval = 5
+    /// Input/tick polling interval while locked (cheap: an idle-time read).
+    static let fastPollInterval: TimeInterval = 0.1
+    static let wakeSettleDelay: TimeInterval = 0.25
+    /// After a "not ready" check fails, re-check on ticks only this often.
+    static let notReadyRecheck: TimeInterval = 2
 
     private let camera: CameraSession
     private let analyzer: FaceAnalyzer?
@@ -49,17 +50,17 @@ final class UnlockCoordinator {
     var policy: () -> MatchPolicy = { MatchPolicy() }
     /// The verified liveness mode (from the Keychain record).
     var liveness: () -> LivenessMode = { .blinkAndMovement }
+    var startMode: () -> ScanStartMode = { .automatic }
 
     /// Called whenever `status` changes (for the menu).
     var onStatusChange: (() -> Void)?
     /// Called when a lock session begins (stop any camera use in windows).
     var onLockSessionBegan: (() -> Void)?
-    /// Called with the outcome of each lock-screen attempt (persisted by the
-    /// app for the setup window's lock-screen test).
+    /// Called with the outcome of lock-screen attempts (persisted by the app
+    /// for the setup window's lock-screen test).
     var onAttemptRecorded: ((AttemptRecord) -> Void)?
-    /// One "didn't run" record per lock session is enough.
-    private var recordedNotReadyThisSession = false
-    /// Whether the camera is currently owned by an unlock attempt.
+
+    /// Whether the camera is currently owned by lock-screen scanning.
     private(set) var isAttempting = false
 
     private(set) var status = "Idle" {
@@ -67,27 +68,44 @@ final class UnlockCoordinator {
     }
 
     private var lockout = AttemptLockout()
+    private var gate = ScanGate(mode: .automatic)
+    private var monitor: ScanMonitor?
     private var inLockSession = false
     private var sawUnlockedSinceLaunch = false
     private var lockStartedAt: TimeInterval = 0
-    private var lastAttemptEnded: TimeInterval = 0
-    private var isSleeping = false
+    private var displaySleeping = false
+    private var displaySleptDuringLock = false
     private var isTyping = false
     private var typingCancellation: TypingCancellation?
-
-    /// Face ID-style indicator on the lock screen (cosmetic, best effort).
-    private let overlay = LockOverlay()
-    /// Last reason an attempt was held back, so each is logged once.
+    private var lastIdle: TimeInterval = .infinity
+    private var notReadyUntil: TimeInterval = 0
+    private var recordedNotReadyThisSession = false
+    private var recordedLockoutThisSession = false
     private var lastBlockedReason: String?
 
+    /// Face ID-style HUD on the lock screen (cosmetic, best effort).
+    private let overlay = LockOverlay()
+
     private var lidWasClosed = false
-    private var lidOpenedAt: TimeInterval?
 
     private var processor: FaceSessionProcessor?
-    private var attemptID = 0
-    private var deadline: DispatchWorkItem?
+    private var scanID = 0
+    private var scanDeadline: DispatchWorkItem?
     private var pollTimer: Timer?
+    private var fastTimer: Timer?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+
+    /// Timing of the current scan, for the diagnostics breakdown.
+    private struct Timing {
+        var trigger: ScanTrigger
+        var start: TimeInterval
+        var inputAt: TimeInterval?
+        var firstFrame: TimeInterval?
+        var firstFace: TimeInterval?
+        var match: TimeInterval?
+        var typingDone: TimeInterval?
+    }
+    private var timing: Timing?
 
     init(camera: CameraSession, analyzer: FaceAnalyzer?) {
         self.camera = camera
@@ -117,8 +135,7 @@ final class UnlockCoordinator {
         observe(workspace, NSWorkspace.didWakeNotification) { [weak self] in self?.handleWake() }
         observe(workspace, NSWorkspace.screensDidWakeNotification) { [weak self] in self?.handleWake() }
 
-        // Cheap 1 Hz poll: catches missed notifications, lid changes and user
-        // activity at the lock screen (which can't be observed directly).
+        // 1 Hz: catches missed notifications and lid changes.
         let timer = Timer(timeInterval: 1, repeats: true) { _ in
             MainActor.assumeIsolated { [weak self] in self?.refresh() }
         }
@@ -127,13 +144,7 @@ final class UnlockCoordinator {
         refresh()
     }
 
-    // MARK: - State tracking
-
-    private func updateLidState() {
-        guard let closed = Clamshell.isClosed() else { return }
-        if lidWasClosed && !closed { lidOpenedAt = now }
-        lidWasClosed = closed
-    }
+    // MARK: - Lock session
 
     private func refresh() {
         updateLidState()
@@ -148,13 +159,138 @@ final class UnlockCoordinator {
             guard sawUnlockedSinceLaunch else { return }
             beginLockSession()
         }
-        maybeStartAttempt(trigger: .activity)
     }
 
     private var idleStatus: String {
         guard isEnabled() else { return "Disabled" }
         return integrityProblem() ?? "Ready (waiting for screen lock)"
     }
+
+    private func beginLockSession() {
+        inLockSession = true
+        lockStartedAt = now
+        lockout.startNewLockSession()
+        gate = ScanGate(mode: startMode())
+        displaySleptDuringLock = false
+        recordedNotReadyThisSession = false
+        recordedLockoutThisSession = false
+        lastBlockedReason = nil
+        notReadyUntil = 0
+        lastIdle = .infinity
+        status = "Screen locked"
+        diag("lock session began (enabled=\(isEnabled()), start=\(gate.mode.rawValue), liveness=\(liveness().rawValue), threshold=\(String(format: "%.2f", policy().threshold)))")
+        onLockSessionBegan?()
+        prepareCamera()
+        startFastTimer()
+    }
+
+    private func endLockSession() {
+        inLockSession = false
+        stopFastTimer()
+        let t = now
+        diag(String(format: "lock session ended: screen unlocked after %.1fs", t - lockStartedAt))
+        if isTyping {
+            // Screen unlocked while (or just after) we typed: it worked.
+            logTiming(unlockedAt: t)
+            record(.unlocked)
+        } else if let processor {
+            processor.flushDiagnostics()
+            if processor.sawFace {
+                record(.unlockedManually(lastIssue: processor.diagnostics.failureOutcome))
+            }
+            diag("scan ended: unlocked manually before a match")
+        }
+        cancelTyping()
+        stopScan()
+        overlay.hide()
+        lockout.startNewLockSession()
+    }
+
+    private func cancelTyping() {
+        typingCancellation?.cancel()
+        typingCancellation = nil
+        isTyping = false
+    }
+
+    private func handleSleep() {
+        guard !displaySleeping else { return }
+        displaySleeping = true
+        updateLidState()
+        if inLockSession { displaySleptDuringLock = true }
+        cancelTyping()
+        if processor != nil {
+            diag("scan ended: display/Mac went to sleep")
+            endScanRecordingOutcome()
+        }
+        overlay.hide()
+    }
+
+    private func handleWake() {
+        let wasSleeping = displaySleeping
+        displaySleeping = false
+        if wasSleeping && displaySleptDuringLock {
+            // A fresh set of looks after sleep → wake.
+            lockout.displayWoke()
+            displaySleptDuringLock = false
+        }
+        gate.reset()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeSettleDelay) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.refresh()
+                self.trigger(.displayWake)
+            }
+        }
+    }
+
+    private func updateLidState() {
+        guard let closed = Clamshell.isClosed() else { return }
+        let opened = lidWasClosed && !closed
+        lidWasClosed = closed
+        if opened && inLockSession {
+            gate.reset()
+            trigger(.lidOpened)
+        }
+    }
+
+    // MARK: - Fast poll (input + continuous checks)
+
+    private func startFastTimer() {
+        guard fastTimer == nil else { return }
+        let timer = Timer(timeInterval: Self.fastPollInterval, repeats: true) { _ in
+            MainActor.assumeIsolated { [weak self] in self?.fastTick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        fastTimer = timer
+    }
+
+    private func stopFastTimer() {
+        fastTimer?.invalidate()
+        fastTimer = nil
+    }
+
+    private func fastTick() {
+        guard inLockSession else { return }
+        let idle = SessionState.secondsSinceUserInput
+        let newInput = idle + 0.05 < lastIdle && idle < 1
+        lastIdle = idle
+
+        if let monitor, processor != nil {
+            let t = now
+            overlay.setVisible(monitor.hudVisible(at: t))
+            if monitor.shouldPauseForNoFace(at: t) {
+                diag("scan paused: no face for \(Int(monitor.config.facelessPause))s (resumes on input or wake)")
+                stopScan()
+                gate.pauseForNoFace()
+                overlay.hide()
+                status = "Paused (no face); move the mouse to resume"
+            }
+            return
+        }
+        trigger(newInput ? .userInput : .tick)
+    }
+
+    // MARK: - Starting / stopping scans
 
     private func record(_ outcome: AttemptOutcome) {
         diag("record: \(outcome.summary)")
@@ -168,115 +304,50 @@ final class UnlockCoordinator {
         log.notice("\(message, privacy: .public)")
     }
 
-    /// Logs (once per distinct reason) why an attempt is being held back.
+    /// Logs (once per distinct reason) why scanning is being held back.
     private func blocked(_ reason: String, detail: String = "") {
         guard reason != lastBlockedReason else { return }
         lastBlockedReason = reason
-        diag("no attempt: \(reason)\(detail.isEmpty ? "" : " (\(detail))")")
+        diag("no scan: \(reason)\(detail.isEmpty ? "" : " (\(detail))")")
     }
 
-    /// Records why no attempt could start (once per lock session).
+    /// Records why scanning can't start (once per lock session).
     private func notReady(_ reason: String) {
         blocked("not ready: \(reason)")
         status = reason
+        notReadyUntil = now + Self.notReadyRecheck
         guard !recordedNotReadyThisSession else { return }
         recordedNotReadyThisSession = true
         record(.notReady(reason))
     }
 
-    private func beginLockSession() {
-        lastBlockedReason = nil
-        diag("lock session began (enabled=\(isEnabled()), liveness=\(liveness().rawValue), threshold=\(String(format: "%.2f", policy().threshold)))")
-        recordedNotReadyThisSession = false
-        inLockSession = true
-        lockStartedAt = now
-        lockout.startNewLockSession()
-        status = "Screen locked"
-        onLockSessionBegan?()
-    }
-
-    private func endLockSession() {
-        inLockSession = false
-        diag(String(format: "lock session ended: screen unlocked after %.1fs", now - lockStartedAt))
-        if isTyping {
-            // Screen unlocked while (or just after) we typed: it worked.
-            record(.unlocked)
-        } else if let processor {
-            // Unlocked by hand while an attempt was still running.
-            processor.flushDiagnostics()
-            record(.unlockedManually(lastIssue: processor.diagnostics.failureOutcome))
-            diag("attempt ended: unlocked manually before a match")
-        }
-        cancelTyping()
-        cancelAttempt(countAsFailure: false)
-        overlay.hide()
-        lockout.startNewLockSession()
-    }
-
-    private func cancelTyping() {
-        typingCancellation?.cancel()
-        typingCancellation = nil
-        isTyping = false
-    }
-
-    private func handleSleep() {
-        // Lid closing usually comes with sleep; remember it for the wake.
-        updateLidState()
-        isSleeping = true
-        cancelTyping()
-        if processor != nil { diag("attempt ended: Mac/display went to sleep") }
-        cancelAttempt(countAsFailure: true)
-        overlay.hide()
-    }
-
-    private func handleWake() {
-        isSleeping = false
-        // Let the lock screen settle before turning the camera on.
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeSettleDelay) { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.refresh()
-                self.maybeStartAttempt(trigger: .wake)
-            }
-        }
-    }
-
-    // MARK: - Attempts
-
-    private enum Trigger { case wake, activity }
-
-    private func maybeStartAttempt(trigger: Trigger) {
+    private func trigger(_ trigger: ScanTrigger) {
         guard inLockSession, processor == nil, !isTyping else { return }
-        guard !isSleeping else { blocked("asleep"); return }
-        guard lockout.canStartAttempt else {
-            blocked("lockout", detail: "failures=\(lockout.failures) attempts=\(lockout.attemptsStarted) passwordRejected=\(lockout.passwordRejected)")
-            if !recordedNotReadyThisSession {
-                recordedNotReadyThisSession = true
+        guard !displaySleeping else { blocked("display asleep"); return }
+        guard !lockout.isLockedOut else {
+            blocked("stopped until manual unlock", detail: "failures=\(lockout.totalFailures) passwordRejected=\(lockout.passwordRejected)")
+            status = lockout.passwordRejected
+                ? "Stopped: password could not be typed or did not unlock. Unlock manually."
+                : "Stopped after \(lockout.totalFailures) failed looks. Unlock manually."
+            if !recordedLockoutThisSession {
+                recordedLockoutThisSession = true
                 record(.lockedOut)
-            }
-            if lockout.passwordRejected {
-                status = "Stopped: password could not be typed or did not unlock. Unlock manually."
-            } else if lockout.isLockedOut {
-                status = "Stopped after \(lockout.failures) failed attempts. Unlock manually."
-            } else {
-                status = "Stopped after \(lockout.attemptsStarted) attempts. Unlock manually."
             }
             return
         }
-        guard now - lockStartedAt >= Self.gracePeriodAfterLock else {
-            blocked("grace period after locking"); return
+        guard !lockout.needsDisplayWake else {
+            blocked("paused until the display sleeps and wakes", detail: "failed looks=\(lockout.failures)")
+            status = "Face not recognised – use your password"
+            return
         }
-        let input = SessionState.secondsSinceUserInput
-        let lidJustOpened = lidOpenedAt.map { now - $0 <= Self.lidOpenWindow } ?? false
-        switch trigger {
-        case .activity:
-            guard input < Self.recentInput else { blocked("waiting for mouse/keyboard input"); return }
-            guard now - lastAttemptEnded >= Self.retryCooldown else { blocked("cooldown after previous attempt"); return }
-        case .wake:
-            guard lidJustOpened || input < Self.recentInput + Self.wakeSettleDelay else {
-                blocked("wake without recent input or lid opening", detail: String(format: "idle %.1fs", input)); return
+        guard gate.shouldStart(on: trigger) else {
+            if trigger == .tick {
+                blocked(gate.pausedForNoFace ? "paused (no face), waiting for input" : "waiting for mouse/keyboard input")
             }
+            return
         }
+        guard now - lockStartedAt >= Self.gracePeriodAfterLock else { blocked("grace period after locking"); return }
+        if trigger == .tick && now < notReadyUntil { return }
         let state = SessionState.current()
         guard state.screenLocked, state.onConsole, state.loginDone else {
             blocked("session state", detail: "locked=\(state.screenLocked) onConsole=\(state.onConsole) loginDone=\(state.loginDone)")
@@ -295,29 +366,44 @@ final class UnlockCoordinator {
         guard Permissions.accessibilityTrusted else { notReady("Accessibility permission missing"); return }
         guard PasswordVault.passwordExists() else { notReady("no password stored"); return }
 
-        lidOpenedAt = nil
+        startScan(trigger: trigger, analyzer: analyzer, template: template, device: device)
+    }
+
+    /// Configure the camera ahead of time (no light) so starting is quick.
+    private func prepareCamera() {
+        guard let template, template.cameraID != nil,
+              let device = CameraSession.device(uniqueID: template.cameraID) else { return }
+        camera.prepare(device: device)
+    }
+
+    private func startScan(trigger: ScanTrigger, analyzer: FaceAnalyzer, template: FaceTemplate, device: AVCaptureDevice) {
+        gate.started(on: trigger)
         lastBlockedReason = nil
-        lockout.recordAttemptStarted()
-        attemptID += 1
-        let id = attemptID
+        scanID += 1
+        let id = scanID
         let policy = policy()
         let liveness = liveness()
-        diag(String(format: "attempt %d started: trigger=%@ sinceLock=%.1fs idle=%.1fs lid=%@ liveness=%@ threshold=%.2f",
-                    lockout.attemptsStarted, trigger == .wake ? "wake" : "activity", now - lockStartedAt, input,
-                    lidJustOpened ? "just-opened" : "-", liveness.rawValue, policy.threshold))
+        let t = now
+        let idle = SessionState.secondsSinceUserInput
+        timing = Timing(trigger: trigger, start: t, inputAt: idle < 5 ? t - idle : nil)
+        monitor = ScanMonitor(start: t)
+        diag(String(format: "scan %d started: trigger=%@ mode=%@ sinceLock=%.1fs idle=%.1fs liveness=%@ threshold=%.2f",
+                    id, trigger.rawValue, gate.mode.rawValue, t - lockStartedAt, idle, liveness.rawValue, policy.threshold))
+
         let processor = FaceSessionProcessor(
             analyzer: analyzer, template: template, policy: policy, liveness: liveness,
             onReadout: { [weak self] readout in
-                let progress = readout.snapshot.progress
-                Task { @MainActor in self?.overlay.update(progress: progress) }
+                let faces = readout.snapshot.faceCount
+                let matched = readout.snapshot.frameMatched
+                Task { @MainActor in self?.frameObserved(id: id, faceCount: faces, matched: matched) }
             },
             onDiagnostics: { line in Diagnostics.write("  \(line)") }
         ) { [weak self] in
-            Task { @MainActor in self?.attemptPassed(id: id) }
+            Task { @MainActor in self?.scanPassed(id: id) }
         }
         self.processor = processor
         isAttempting = true
-        status = "Looking for your face… (attempt \(lockout.attemptsStarted) of max \(lockout.maximumAttempts))"
+        status = "Looking for your face…"
         overlay.showScanning()
 
         camera.start(device: device, handler: { pixelBuffer, time in
@@ -325,72 +411,91 @@ final class UnlockCoordinator {
         }, completion: { [weak self] error in
             guard let error else { return }
             let message = String(describing: error)
-            Task { @MainActor in self?.attemptFailedToStart(id: id, message: message) }
+            Task { @MainActor in self?.scanFailedToStart(id: id, message: message) }
         })
 
-        let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.attemptTimedOut(id: id) }
+        if gate.mode == .onInput {
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated { self?.scanTimeLimit(id: id) }
+            }
+            scanDeadline = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.onInputScanDuration, execute: work)
         }
-        deadline = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.attemptDuration, execute: work)
     }
 
-    private func stopCamera() {
-        deadline?.cancel()
-        deadline = nil
+    /// Stops the camera and forgets the current scan (no recording).
+    private func stopScan() {
+        scanDeadline?.cancel()
+        scanDeadline = nil
         processor?.finish()
         processor = nil
+        monitor = nil
         camera.stop()
         isAttempting = false
-        lastAttemptEnded = now
     }
 
-    /// Only attempts in which a face was seen count as failures.
-    private func cancelAttempt(countAsFailure: Bool) {
+    /// Ends the scan, saving what held it back if a face was seen.
+    private func endScanRecordingOutcome() {
         guard let processor else { return }
         processor.flushDiagnostics()
         let sawFace = processor.sawFace
-        let diagnostics = processor.diagnostics
-        stopCamera()
-        if countAsFailure && sawFace {
-            lockout.recordFailure()
-            record(diagnostics.failureOutcome)
+        let outcome = processor.diagnostics.failureOutcome
+        stopScan()
+        if sawFace { record(outcome) }
+    }
+
+    private func frameObserved(id: Int, faceCount: Int, matched: Bool) {
+        guard id == scanID, processor != nil, var monitor else { return }
+        let t = now
+        if timing?.firstFrame == nil { timing?.firstFrame = t }
+        if faceCount > 0, timing?.firstFace == nil { timing?.firstFace = t }
+        let event = monitor.observe(time: t, faceCount: faceCount, matched: matched)
+        self.monitor = monitor
+        overlay.setVisible(monitor.hudVisible(at: t))
+        guard event == .failedLook else { return }
+
+        lockout.recordFailure()
+        diag("failed look \(lockout.failures)/\(lockout.maximumFailures) (lock-session total \(lockout.totalFailures)/\(lockout.maximumTotalFailures))")
+        if lockout.canScan {
+            overlay.flashFailure()
+            status = "Not recognised (\(lockout.remainingBeforePause) look(s) left)"
+        } else {
+            diag("scan ended: too many failed looks")
+            endScanRecordingOutcome()
+            overlay.showStopped()
+            status = lockout.isLockedOut
+                ? "Stopped after \(lockout.totalFailures) failed looks. Unlock manually."
+                : "Face not recognised – use your password"
         }
     }
 
-    private func attemptFailedToStart(id: Int, message: String) {
-        guard id == attemptID, processor != nil else { return }
-        stopCamera()
+    private func scanFailedToStart(id: Int, message: String) {
+        guard id == scanID, processor != nil else { return }
+        stopScan()
         overlay.hide()
-        diag("attempt ended: camera error: \(message)")
+        diag("scan ended: camera error: \(message)")
         status = "Camera error: \(message)"
         record(.cameraError(message))
+        notReadyUntil = now + Self.notReadyRecheck
     }
 
-    private func attemptTimedOut(id: Int) {
-        guard id == attemptID, let processor else { return }
-        processor.flushDiagnostics()
-        let sawFace = processor.sawFace
-        let diagnostics = processor.diagnostics
-        stopCamera()
-        diag("attempt ended: timed out after \(Int(Self.attemptDuration))s without a match")
-        if sawFace { overlay.showFailure() } else { overlay.hide() }
-        record(diagnostics.failureOutcome)
-        if sawFace {
-            lockout.recordFailure()
-            status = lockout.canStartAttempt
-                ? "Not recognised (\(lockout.remainingAttempts) attempt(s) left)"
-                : "Stopped after \(lockout.failures) failed attempts. Unlock manually."
-        } else {
-            status = "No face seen; will retry on activity"
-        }
+    private func scanTimeLimit(id: Int) {
+        guard id == scanID, processor != nil else { return }
+        diag("scan ended: \(Int(Self.onInputScanDuration))s limit (on-input mode)")
+        let sawFace = processor?.sawFace ?? false
+        endScanRecordingOutcome()
+        if sawFace { overlay.flashFailureAndHide() } else { overlay.hide() }
+        status = "Waiting for mouse/keyboard input"
     }
 
-    private func attemptPassed(id: Int) {
-        guard id == attemptID, let processor else { return }
+    // MARK: - Unlocking
+
+    private func scanPassed(id: Int) {
+        guard id == scanID, let processor else { return }
+        timing?.match = now
         processor.flushDiagnostics()
-        stopCamera()
-        diag("attempt ended: face matched with liveness")
+        stopScan()
+        diag("scan ended: face matched with liveness")
 
         // Re-verify everything right before typing.
         let state = SessionState.current()
@@ -407,15 +512,18 @@ final class UnlockCoordinator {
         typingCancellation = cancellation
         isTyping = true
         status = "Recognised – unlocking…"
+        // The tick animation runs in parallel; typing doesn't wait for it.
         overlay.showSuccess()
-        diag("typing password")
+        let wakeFirst = SessionState.displayAsleep
         Task.detached(priority: .userInitiated) { [weak self] in
             let failure: AttemptOutcome?
             do {
                 let secret = try PasswordVault.readPassword()
                 defer { secret.wipe() }
-                KeyTyper.wakeDisplay()
-                usleep(250_000)
+                if wakeFirst {
+                    KeyTyper.wakeDisplay()
+                    usleep(100_000)
+                }
                 try KeyTyper.typeAndSubmit(secret, cancellation: cancellation)
                 failure = nil
             } catch let error as PasswordVault.VaultError {
@@ -430,7 +538,8 @@ final class UnlockCoordinator {
     }
 
     private func typingFinished(id: Int, failure: AttemptOutcome?) {
-        guard id == attemptID, isTyping else { return }
+        guard id == scanID, isTyping else { return }
+        timing?.typingDone = now
         if let failure {
             isTyping = false
             typingCancellation = nil
@@ -442,9 +551,10 @@ final class UnlockCoordinator {
             log.error("Typing aborted: \(failure.summary, privacy: .public)")
             return
         }
+        diag("typing done")
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.unlockConfirmTimeout) { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, id == self.attemptID, self.isTyping else { return }
+                guard let self, id == self.scanID, self.isTyping else { return }
                 self.isTyping = false
                 self.typingCancellation = nil
                 if SessionState.current().screenLocked && self.inLockSession {
@@ -456,5 +566,21 @@ final class UnlockCoordinator {
                 }
             }
         }
+    }
+
+    private func logTiming(unlockedAt: TimeInterval) {
+        guard let t = timing else { return }
+        func ms(_ a: TimeInterval?, _ b: TimeInterval?) -> String {
+            guard let a, let b else { return "-" }
+            return String(format: "%.0fms", (b - a) * 1000)
+        }
+        var line = "timing: trigger=\(t.trigger.rawValue)"
+        line += " scanStart→firstFrame=\(ms(t.start, t.firstFrame))"
+        line += " firstFace→match=\(ms(t.firstFace, t.match))"
+        line += " match→typingDone=\(ms(t.match, t.typingDone))"
+        line += " typingDone→unlocked=\(ms(t.typingDone, unlockedAt))"
+        line += " scanStart→unlocked=\(ms(t.start, unlockedAt))"
+        if let input = t.inputAt { line += " lastInput→unlocked=\(ms(input, unlockedAt))" }
+        diag(line)
     }
 }

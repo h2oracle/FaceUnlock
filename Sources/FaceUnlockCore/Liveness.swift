@@ -40,13 +40,16 @@ public enum LivenessMode: String, Codable, CaseIterable, Sendable {
 /// pose changes but almost no change in eye openness.
 ///
 /// Thresholds are deliberately low so a person sitting normally passes in
-/// about 1–2 s. They are estimates, not calibrated on a dataset; the Test
+/// about 0.5–1 s. They are estimates, not calibrated on a dataset; the Test
 /// step shows the live numbers.
 public struct MicroMotionCheck: Sendable {
     public struct Config: Equatable, Sendable {
-        /// Matched-frame time span needed before deciding.
-        public var minimumDuration: TimeInterval = 1.0
-        public var minimumSamples = 12
+        /// Matched-frame time span needed before deciding. The pass is tied
+        /// to this duration, not to a frame count, so it doesn't depend on
+        /// the camera's frame rate (the sample minimum only guards against
+        /// deciding from too few points at very low frame rates).
+        public var minimumDuration: TimeInterval = 0.5
+        public var minimumSamples = 6
         /// Robust (p10–p90) range in yaw or pitch, degrees.
         public var minimumPoseRange: Double = 0.8
         /// Above this the pose estimate is noise / the face left.

@@ -17,8 +17,6 @@ public struct FrameAnalysis: @unchecked Sendable {
     public var leftEyeOpenness: Double?
     public var rightEyeOpenness: Double?
     public var faceShape: Double?
-    /// 112×112 face aligned to the ArcFace/SFace 5-point template.
-    public var alignedFace: CGImage?
     public var embedding: [Float]?
 
     public static let none = FrameAnalysis(faceCount: 0)
@@ -52,27 +50,62 @@ public final class FaceAnalyzer: @unchecked Sendable {
 
     private let embedder: FaceEmbedder?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    /// Reused across frames (one camera queue at a time; guarded anyway).
+    private let lock = NSLock()
+    private let sequenceHandler = VNSequenceRequestHandler()
+    private let rectanglesRequest: VNDetectFaceRectanglesRequest = {
+        let r = VNDetectFaceRectanglesRequest()
+        r.revision = VNDetectFaceRectanglesRequestRevision3
+        return r
+    }()
+    private let landmarksRequest = VNDetectFaceLandmarksRequest()
+    private var alignedPool: CVPixelBufferPool?
 
     public init(embedder: FaceEmbedder?) {
         self.embedder = embedder
+        var pool: CVPixelBufferPool?
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: FaceEmbedder.inputSize,
+            kCVPixelBufferHeightKey as String: FaceEmbedder.inputSize,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any],
+        ]
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool)
+        alignedPool = pool
     }
 
+    /// Loads the Vision and Core ML models now (at app launch) so the first
+    /// frame of an unlock attempt isn't slowed by lazy initialisation.
+    public func prewarm() {
+        embedder?.prewarm()
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, 640, 480, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]] as CFDictionary, &buffer)
+        if let buffer { _ = analyze(pixelBuffer: buffer) }
+    }
+
+    /// Fast path for camera frames: reused Vision handler/requests and the
+    /// aligned face rendered straight into a pooled pixel buffer.
     public func analyze(pixelBuffer: CVPixelBuffer, wantQuality: Bool = false) -> FrameAnalysis {
+        lock.lock()
+        defer { lock.unlock() }
         let image = CIImage(cvPixelBuffer: pixelBuffer)
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
-        return analyze(image: image, handler: handler, wantQuality: wantQuality)
+        return analyze(image: image, wantQuality: wantQuality) { requests in
+            try self.sequenceHandler.perform(requests, on: pixelBuffer, orientation: .up)
+        }
     }
 
     public func analyze(cgImage: CGImage, wantQuality: Bool = false) -> FrameAnalysis {
+        lock.lock()
+        defer { lock.unlock() }
         let image = CIImage(cgImage: cgImage)
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
-        return analyze(image: image, handler: handler, wantQuality: wantQuality)
+        return analyze(image: image, wantQuality: wantQuality) { try handler.perform($0) }
     }
 
-    private func analyze(image: CIImage, handler: VNImageRequestHandler, wantQuality: Bool) -> FrameAnalysis {
-        let rectangles = VNDetectFaceRectanglesRequest()
-        rectangles.revision = VNDetectFaceRectanglesRequestRevision3
-        do { try handler.perform([rectangles]) } catch { return .none }
+    private func analyze(image: CIImage, wantQuality: Bool, perform: ([VNRequest]) throws -> Void) -> FrameAnalysis {
+        let rectangles = rectanglesRequest
+        do { try perform([rectangles]) } catch { return .none }
 
         let faces = (rectangles.results ?? []).filter { $0.boundingBox.width >= Self.minimumFaceWidth }
         var result = FrameAnalysis(faceCount: faces.count)
@@ -83,7 +116,7 @@ public final class FaceAnalyzer: @unchecked Sendable {
         result.pitchDegrees = face.pitch.map { $0.doubleValue * 180 / .pi }
         result.rollDegrees = face.roll.map { $0.doubleValue * 180 / .pi }
 
-        let landmarksRequest = VNDetectFaceLandmarksRequest()
+        let landmarksRequest = self.landmarksRequest
         landmarksRequest.inputFaceObservations = [face]
         var requests: [VNRequest] = [landmarksRequest]
         var qualityRequest: VNDetectFaceCaptureQualityRequest?
@@ -93,7 +126,7 @@ public final class FaceAnalyzer: @unchecked Sendable {
             qualityRequest = q
             requests.append(q)
         }
-        do { try handler.perform(requests) } catch { return result }
+        do { try perform(requests) } catch { return result }
 
         result.captureQuality = qualityRequest?.results?.first?.faceCaptureQuality
 
@@ -123,24 +156,30 @@ public final class FaceAnalyzer: @unchecked Sendable {
         let imageRightEye = eyeA.x <= eyeB.x ? eyeB : eyeA
         let source = [imageLeftEye, imageRightEye, nose, mouthLeft, mouthRight]
 
-        guard let aligned = align(image: image, sourcePoints: source) else { return result }
-        result.alignedFace = aligned
-        if let embedder {
-            result.embedding = try? embedder.embedding(for: aligned)
+        guard let warped = align(image: image, sourcePoints: source), let embedder else { return result }
+        // Render straight into a pooled BGRA buffer for Core ML.
+        var buffer: CVPixelBuffer?
+        if let alignedPool, CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, alignedPool, &buffer) == kCVReturnSuccess,
+           let buffer {
+            ciContext.render(warped, to: buffer, bounds: Self.alignedRect, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+            result.embedding = try? embedder.embedding(for: buffer)
+        } else if let cg = ciContext.createCGImage(warped, from: Self.alignedRect) {
+            result.embedding = try? embedder.embedding(for: cg)
         }
         return result
     }
 
+    private static let alignedRect = CGRect(x: 0, y: 0, width: FaceEmbedder.inputSize, height: FaceEmbedder.inputSize)
+
     /// Warps the face onto the 112×112 template. Vision points and CIImage
     /// share a lower-left origin; the template is flipped to match.
-    private func align(image: CIImage, sourcePoints: [CGPoint]) -> CGImage? {
+    private func align(image: CIImage, sourcePoints: [CGPoint]) -> CIImage? {
         let side = CGFloat(FaceEmbedder.inputSize)
         let destination = Self.template.map { CGPoint(x: $0.x, y: side - $0.y) }
         guard let transform = LandmarkGeometry.similarityTransform(from: sourcePoints, to: destination) else { return nil }
-        let warped = image
+        return image
             .clampedToExtent()
             .transformed(by: transform, highQualityDownsample: true)
-            .cropped(to: CGRect(x: 0, y: 0, width: side, height: side))
-        return ciContext.createCGImage(warped, from: CGRect(x: 0, y: 0, width: side, height: side))
+            .cropped(to: Self.alignedRect)
     }
 }

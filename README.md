@@ -46,8 +46,9 @@ through seven steps, ticking each one off live: Camera access → Accessibility
 login, on by default) → Lock-screen test. Each step unlocks once the previous
 ones are done.
 
-The **lock-screen test** locks the screen after a 3-second countdown. Wait
-about 5 seconds, then move the mouse or press Shift and look at the camera.
+The **lock-screen test** locks the screen after a 3-second countdown. Then
+just look at the camera (with *Start scanning: only after input*, move the
+mouse or press Shift first).
 The outcome of every attempt at the lock screen is stored as a small record:
 time, result, and a reason such as no face, best score, no blink, or front
 window owner. It never contains the password. When you come back, the step
@@ -84,8 +85,11 @@ your login password. Turning face unlock *off* never does.
 
 ### Match strictness
 
-*Match strictness* (asks for your login password) sets the cosine-similarity threshold (default 0.55,
-"Standard"). Both the averaged template and the best single enrolment sample
+*Match strictness* (asks for your login password) sets the cosine-similarity
+threshold: Relaxed 0.55, Standard 0.70 (default for new set-ups), Strict 0.80.
+Set-ups made before 0.70 became the default keep their threshold. If your
+test scores are high, the Test step suggests the stricter value and applies
+it with one password confirmation. Both the averaged template and the best single enrolment sample
 must reach it on 3 consecutive frames. Use *Test recognition…* to see your
 typical score; pick the strictest setting that still recognises you reliably.
 Changing the value with `defaults write` is treated as tampering: unlock
@@ -93,22 +97,32 @@ stops until you choose a strictness in the menu again.
 
 ## How it works
 
-- **Trigger**: listens for `com.apple.screenIsLocked/Unlocked`, display wake,
-  system wake and screensaver stop, and polls the authoritative lock state
-  (`CGSessionCopyCurrentDictionary`) once a second. An attempt starts on a
-  wake only if it came with keyboard/mouse/trackpad input or the lid was just
-  opened, or on such input while the screen is locked. Nothing happens in the
-  first 5 s after locking.
-- **Attempt**: the camera runs for at most **10 s**, then turns off.
+- **Trigger** (menu → *Start scanning*, or the Setup "Turn on" step; not
+  password-gated):
+  - **Automatically when the lock screen shows** (default): while the session
+    is locked and the display is awake, the camera scans continuously,
+    starting 1 s after locking and again on every display wake or lid
+    opening. No input is needed. **The camera's green light is on whenever
+    the lock screen is visible**; macOS turns the display off at the lock
+    screen after a short time, which stops the camera.
+  - **Only after I move the mouse or press a key**: input starts a scan of up
+    to 10 s.
+  The lock state comes from `CGSessionCopyCurrentDictionary`. Input is
+  detected by polling the system idle time 10× a second while locked. If no
+  face is seen for 60 s, the camera pauses until the next input or wake. The
+  Face ID-style HUD fades out after 3 s without a face and fades back in when
+  one appears.
 - **Recognition**: Vision face detection + 76-point landmarks → 5-point
   alignment to a 112×112 crop → **SFace** (MobileFaceNet) Core ML model →
   128-d embedding → cosine similarity against the enrolled template.
 - **Liveness** (menu → *Liveness*, or the Test step; changing it asks for your
   login password and is recorded in the Keychain integrity item):
   - **Natural movement** (default for new set-ups): no blink needed. Over at
-    least 1 s of matching frames the head must move slightly in 3D (≥ 0.8°
-    yaw or pitch) and the eye region must show small frame-to-frame changes
-    (≥ 2.5 %). A person sitting normally should pass in about 1–2 s. These
+    least 0.5 s of matching frames (measured as time, not frames) the head
+    must move slightly in 3D (≥ 0.8° yaw or pitch) and the eye region must
+    show small frame-to-frame changes (≥ 2.5 %). A person sitting normally
+    should pass in well under a second. Set-ups from before this setting
+    existed are offered a one-click switch in the Setup window. These
     thresholds are estimates. Check them against a photo with *Test
     recognition*.
   - **Blink + movement**: a natural blink (open → both closed briefly → open,
@@ -118,12 +132,12 @@ stops until you choose a strictness in the menu again.
   Liveness evidence only counts from frames that match you. Any frame without
   a matching single face (no face, two faces, someone else, or a face that
   couldn't be read) resets all evidence.
-- **Lock-screen indicator**: while an attempt runs, a small Face ID-style ring
-  is shown above the password field. It fills up as evidence builds, shows a
-  green tick on a match, and briefly says "Face not recognised" on failure.
-  To appear above the lock screen it uses a private macOS window-server
-  feature. If that doesn't work, the ring simply isn't shown and unlocking is
-  unaffected. The camera light is always the fallback indicator.
+- **Lock-screen indicator**: an iPhone-style frosted HUD above the password
+  field shows a pulsing Face ID glyph ("Looking for you…"). On a match a
+  circle and checkmark draw in, while typing starts at the same time. A
+  failed look shakes the glyph with "Face Not Recognised". To appear above
+  the lock screen it uses a private macOS window-server feature. If that
+  doesn't work, the HUD simply isn't shown and unlocking is unaffected. The camera light is always the fallback indicator.
 - **Diagnostics**: every lock session and attempt is logged to
   `~/Library/Application Support/FaceUnlock/diagnostics.log` (0600, rotated at
   ~1 MB). The log has the attempt start (trigger, time since lock, idle time),
@@ -141,10 +155,18 @@ stops until you choose a strictness in the menu again.
   if not, or if the Mac goes to sleep. The password is held in a buffer
   that is zeroed afterwards. Copies inside macOS (Keychain, event system,
   the password field) can't be wiped.
-- **Lockout**: after **3 failed attempts** in one lock session (attempts where
-  no face was seen don't count; going to sleep mid-attempt does), after **5
-  attempts in total**, or if a typed password doesn't unlock the screen within
-  6 s, FaceUnlock stops trying until you unlock manually.
+- **Lockout**: a *failed look* is one face in view that keeps not matching
+  for about 2 s. Frames with no face never count. After **3 failed looks**
+  the camera stops and the HUD says "Face Not Recognised – use your
+  password"; it resumes only after the display sleeps and wakes again, and
+  moving the mouse doesn't resume it. After **5 failed looks** in one lock
+  session, or if a typed password doesn't unlock the screen within 6 s,
+  FaceUnlock stops until you unlock manually.
+- **Speed**: the camera runs at up to 30 fps and the session is configured in
+  advance. The models are loaded and warmed up at launch, and the password is
+  typed at about 8 ms per character. The diagnostics log has a timing
+  breakdown for each unlock (scan start → first frame → match → typing done
+  → unlocked).
 
 ## Security limitations
 

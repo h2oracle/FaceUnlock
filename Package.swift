@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "FaceUnlock", targets: ["FaceUnlock"]),
+        .library(name: "FaceUnlockCore", targets: ["FaceUnlockCore"]),
     ],
     targets: [
         // Pure logic + Vision/Core ML face pipeline. No AppKit, no UI, no I/O

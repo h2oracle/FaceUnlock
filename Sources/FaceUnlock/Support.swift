@@ -35,6 +35,17 @@ enum Settings {
 
     static var policy: MatchPolicy { MatchPolicy(threshold: matchThreshold) }
 
+    private static let scanStartKey = "scanStartMode"
+
+    /// When lock-screen scanning starts. Not part of the integrity record:
+    /// it changes when the camera runs, not how strict matching is.
+    static var scanStartMode: ScanStartMode {
+        get { defaults.string(forKey: scanStartKey).flatMap(ScanStartMode.init(rawValue:)) ?? .automatic }
+        set { defaults.set(newValue.rawValue, forKey: scanStartKey) }
+    }
+
+    static var hasMatchThreshold: Bool { defaults.object(forKey: thresholdKey) != nil }
+
     private static let livenessKey = "livenessMode"
 
     static var hasLivenessMode: Bool { defaults.string(forKey: livenessKey) != nil }
