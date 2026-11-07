@@ -3,8 +3,9 @@ import Foundation
 
 /// How much proof of a live person an unlock needs (on top of a matching face).
 public enum LivenessMode: String, Codable, CaseIterable, Sendable {
-    /// Passive: the head must turn a little, and the landmarks must move in
-    /// a way only a 3D face can (parallax). No blink needed. Default.
+    /// Passive: either the landmarks move the way only a 3D face can as the
+    /// head turns a little (parallax), or a natural blink is seen. No blink
+    /// is *required*. Default.
     case naturalMovement
     /// A natural blink plus slight head movement.
     case blinkAndMovement
@@ -95,6 +96,10 @@ public struct NaturalMovementCheck: Sendable {
         var pitch: Double
         var points: [CGPoint]
         var interocular: Double
+        /// Mean squared homography residual (per landmark, in IOD units)
+        /// against the previous sample: an estimate of landmark noise that
+        /// settles quickly because every frame contributes.
+        var adjacentNoise: Double?
     }
 
     public let config: Config
@@ -129,7 +134,12 @@ public struct NaturalMovementCheck: Sendable {
             // Different landmark layout: can't compare; start again.
             samples.removeAll()
         }
-        samples.append(Sample(time: time, yaw: y, pitch: p, points: pts, interocular: iod))
+        var adjacent: Double?
+        if let prev = samples.last, let r = Homography.residuals(from: prev.points, to: pts) {
+            let scale = 1 / iod
+            adjacent = r.reduce(0) { $0 + ($1.dx * $1.dx + $1.dy * $1.dy) * scale * scale } / Double(r.count)
+        }
+        samples.append(Sample(time: time, yaw: y, pitch: p, points: pts, interocular: iod, adjacentNoise: adjacent))
         if samples.count > config.window { samples.removeFirst(samples.count - config.window) }
         // Re-evaluate every other frame: ample resolution, half the cost.
         observedCount += 1
@@ -220,17 +230,27 @@ public struct NaturalMovementCheck: Sendable {
         }
         guard pairs >= 2 else { return (rotation, 0, 0, pairs) }
         let kp = Double(pairs)
-        var signal = 0.0, noise = 0.0
+        var signal = 0.0, spreadNoise = 0.0
         for i in 0..<n {
             let mx = sum[i].dx / kp, my = sum[i].dy / kp
             signal += mx * mx + my * my
             // Sample variance across pairs → squared standard error of the mean.
             let vx = max(0, (sumSq[i].dx / kp - mx * mx) * kp / (kp - 1))
             let vy = max(0, (sumSq[i].dy / kp - my * my) * kp / (kp - 1))
-            noise += (vx + vy) / kp
+            spreadNoise += (vx + vy) / kp
         }
         let parallax = (signal / Double(n)).squareRoot()
-        let noiseRMS = (noise / Double(n)).squareRoot()
+        // Noise of the mean residual. The frame-to-frame estimate uses every
+        // frame in the window, so it settles much faster than the spread of
+        // a handful of pairs; the spread is the fallback early on.
+        let adjacent = samples.compactMap(\.adjacentNoise)
+        let noiseSquared: Double
+        if adjacent.count >= 8 {
+            noiseSquared = adjacent.reduce(0, +) / Double(adjacent.count) / kp
+        } else {
+            noiseSquared = spreadNoise / Double(n)
+        }
+        let noiseRMS = noiseSquared.squareRoot()
         let snr = noiseRMS > 0 ? parallax / noiseRMS : (parallax > 0 ? .infinity : 0)
         return (rotation, parallax, snr, pairs)
     }

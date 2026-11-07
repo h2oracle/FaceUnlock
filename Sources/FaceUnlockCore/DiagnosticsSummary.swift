@@ -32,6 +32,7 @@ public struct DiagnosticsSummarizer: Sendable {
     private var opennessMax: Double?
     private var ratioMin: Double?
     private var resets: [UnlockEvaluator.ResetReason: Int] = [:]
+    private var unusable: [String: Int] = [:]
 
     public init(threshold: Float, start: TimeInterval, interval: TimeInterval = 0.5) {
         self.threshold = threshold
@@ -54,6 +55,7 @@ public struct DiagnosticsSummarizer: Sendable {
         }
         if let r = s.eyeRatio { ratioMin = min(ratioMin ?? r, r) }
         if let reason = s.resetReason { resets[reason, default: 0] += 1 }
+        if let reason = s.frameUnusableReason { unusable[reason, default: 0] += 1 }
         guard time - windowStart >= interval else { return nil }
         return flush(at: time)
     }
@@ -77,6 +79,10 @@ public struct DiagnosticsSummarizer: Sendable {
             let parts = UnlockEvaluator.ResetReason.allCases.compactMap { r in resets[r].map { "\(r.rawValue)×\($0)" } }
             line += " resets: " + parts.joined(separator: ", ")
         }
+        if !unusable.isEmpty {
+            line += " unusable: " + unusable.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: ", ")
+        }
+        unusable = [:]
         frames = 0
         faces = [0, 0, 0]
         opennessMin = nil

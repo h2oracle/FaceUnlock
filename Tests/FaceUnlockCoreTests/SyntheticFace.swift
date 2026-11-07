@@ -34,6 +34,9 @@ struct SyntheticFace {
         return p
     }()
 
+    /// Model indices of the two eye contours.
+    static let eyeIndices: Set<Int> = Set(0..<8).union(20..<28)
+
     struct Pose {
         var yaw = 0.0, pitch = 0.0, roll = 0.0 // degrees
         var tx = 0.0, ty = 0.0, distance = 8.0 // IOD units (≈50 cm)
@@ -41,6 +44,8 @@ struct SyntheticFace {
 
     var flat: Bool
     var noise: Double // landmark noise, fraction of IOD
+    /// Eye openness factor over time (1 = open). Only a real head can blink.
+    var blink: (Double) -> Double = { _ in 1 }
     var poseNoise = 0.7 // reported yaw/pitch noise, degrees
     private var rng: UInt64
 
@@ -68,22 +73,32 @@ struct SyntheticFace {
             r = SIMD3(r.x, cos(x) * r.y - sin(x) * r.z, sin(x) * r.y + cos(x) * r.z)
             return SIMD3(cos(z) * r.x - sin(z) * r.y, sin(z) * r.x + cos(z) * r.y, r.z)
         }
-        func project(_ m: SIMD3<Double>) -> CGPoint {
-            let local = SIMD3(m.x, m.y, flat ? 0 : m.z)
+        let openness = flat ? 1 : blink(time)
+        func project(_ m: SIMD3<Double>, index: Int) -> CGPoint {
+            var y = m.y
+            if Self.eyeIndices.contains(index) { y *= openness } // eye contour (centred on y = 0)
+            let local = SIMD3(m.x, y, flat ? 0 : m.z)
             let c = rotate(local)
             // Camera looks along -z of the face: depth = distance - z.
             let depth = pose.distance - c.z
             return CGPoint(x: f * (c.x + pose.tx) / depth, y: f * (c.y + pose.ty) / depth)
         }
         let iodPixels = f / pose.distance
-        let points = Self.model.map { m -> CGPoint in
-            let p = project(m)
-            return CGPoint(x: p.x + gaussian() * noise * iodPixels, y: p.y + gaussian() * noise * iodPixels)
+        var points: [CGPoint] = []
+        for (i, m) in Self.model.enumerated() {
+            let p = project(m, index: i)
+            points.append(CGPoint(x: p.x + gaussian() * noise * iodPixels, y: p.y + gaussian() * noise * iodPixels))
         }
-        let eyes = 0.10
+        // Eye measurements from the projected (noisy) landmarks, as in the app.
+        let left = Array(points[0..<8]), right = Array(points[20..<28])
+        let lo = LandmarkGeometry.eyeOpenness(left) ?? 0
+        let ro = LandmarkGeometry.eyeOpenness(right) ?? 0
+        let lc = LandmarkGeometry.centroid(left) ?? .zero, rc = LandmarkGeometry.centroid(right) ?? .zero
+        let mouth = CGPoint(x: (points[13].x + points[33].x) / 2, y: (points[13].y + points[33].y) / 2)
+        let shape = LandmarkGeometry.faceShape(leftEye: lc, rightEye: rc, mouth: mouth) ?? 1.2
         return FrameObservation(
             time: time, faceCount: 1, score: MatchScore(centroid: score, bestSample: score),
-            eyes: EyeSample(time: time, left: eyes, right: eyes, faceShape: 1.2, pitch: pose.pitch),
+            eyes: EyeSample(time: time, left: lo, right: ro, faceShape: shape, pitch: pose.pitch),
             yawDegrees: pose.yaw + gaussian() * poseNoise, pitchDegrees: pose.pitch + gaussian() * poseNoise,
             landmarks: points, interocular: iodPixels)
     }

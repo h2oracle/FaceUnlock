@@ -131,10 +131,25 @@ import Testing
 
     @Test func goodFrameIsUsable() { #expect(frame().isUsable) }
 
+    @Test func missingPoseIsStillUsable() {
+        // Vision sometimes omits yaw/pitch: a good, matching face must count.
+        #expect(frame(yaw: nil, pitch: nil).isUsable)
+        #expect(FrameQualityGate.problem(frame(yaw: nil, pitch: nil)) == nil)
+    }
+
+    @Test func poseIsEstimatedFromLandmarks() throws {
+        let eyesL = CGPoint(x: 100, y: 200), eyesR = CGPoint(x: 160, y: 200)
+        let frontal = try #require(LandmarkGeometry.estimatePose(leftEye: eyesL, rightEye: eyesR,
+                                                                  noseTip: CGPoint(x: 130, y: 164), mouth: CGPoint(x: 130, y: 140)))
+        #expect(abs(frontal.yaw) < 1 && abs(frontal.pitch) < 1)
+        let turned = try #require(LandmarkGeometry.estimatePose(leftEye: eyesL, rightEye: eyesR,
+                                                                 noseTip: CGPoint(x: 140, y: 164), mouth: CGPoint(x: 130, y: 140)))
+        #expect(turned.yaw > 10)
+    }
+
     @Test func badFramesAreNotUsable() {
         #expect(!frame(yaw: 30).isUsable)
         #expect(!frame(pitch: -25).isUsable)
-        #expect(!frame(yaw: nil).isUsable)
         #expect(!frame(quality: 0.1).isUsable)
         #expect(!frame(box: CGRect(x: 0.4, y: 0.4, width: 0.05, height: 0.07)).isUsable)
         #expect(!frame(box: CGRect(x: 0.8, y: 0.3, width: 0.25, height: 0.35)).isUsable) // cut off

@@ -191,7 +191,8 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         // A short run of unreadable / badly angled frames keeps the evidence…
         for k in 0..<5 {
             let t = (12.0 + Double(k)) / 15
-            let s = e.observe(FrameObservation(time: t, faceCount: 1, score: nil, eyes: nil, yawDegrees: 40, pitchDegrees: 0))
+            let s = e.observe(FrameObservation(time: t, faceCount: 1, score: nil, eyes: nil, yawDegrees: 40, pitchDegrees: 0,
+                                               usable: false))
             #expect(s.blinked)
             #expect(!s.frameMatched && !s.frameUsable)
         }

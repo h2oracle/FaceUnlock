@@ -14,7 +14,11 @@ First public release.
 - Start-scanning modes: automatic while the lock screen shows (default), or
   only after mouse/keyboard input.
 - Natural movement uses 3D parallax (homography residuals of the facial
-  landmarks as the head turns) to reject flat photos, still or moved.
+  landmarks as the head turns) to reject flat photos, still or moved. A
+  natural blink in recognised frames with slight movement also passes.
+- Frames are judged by a quality gate (angle, size, cut off, capture
+  quality). A missing Vision pose is estimated from the landmarks rather
+  than rejected.
 - Failed-look lockout that can't be reset by covering the lens: 3 per scan (re-armed by input
   after a 2 s pause), 5 per lock session, and a 2-minute face-time cap. It also counts
   brief unrecognised appearances and matched-but-not-live faces. It stops

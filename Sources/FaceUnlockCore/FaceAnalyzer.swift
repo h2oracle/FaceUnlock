@@ -12,6 +12,9 @@ public struct FrameAnalysis: @unchecked Sendable {
     public var yawDegrees: Double?
     public var pitchDegrees: Double?
     public var rollDegrees: Double?
+    /// True when yaw/pitch were estimated from the landmarks because Vision
+    /// didn't report a pose for this observation.
+    public var poseEstimated = false
     /// VNDetectFaceCaptureQualityRequest score (0–1), only when requested.
     public var captureQuality: Float?
     public var leftEyeOpenness: Double?
@@ -158,6 +161,15 @@ public final class FaceAnalyzer: @unchecked Sendable {
               let mouthRight = lips.max(by: { $0.x < $1.x }) else { return result }
         result.faceShape = LandmarkGeometry.faceShape(leftEye: eyeA, rightEye: eyeB, mouth: mouth)
         result.interocular = Double(hypot(eyeA.x - eyeB.x, eyeA.y - eyeB.y))
+        if result.yawDegrees == nil || result.pitchDegrees == nil {
+            // Vision sometimes omits the pose; estimate it from the landmarks.
+            let tip = points(landmarks.noseCrest).last ?? nose
+            if let est = LandmarkGeometry.estimatePose(leftEye: eyeA, rightEye: eyeB, noseTip: tip, mouth: mouth) {
+                if result.yawDegrees == nil { result.yawDegrees = est.yaw }
+                if result.pitchDegrees == nil { result.pitchDegrees = est.pitch }
+                result.poseEstimated = true
+            }
+        }
         result.landmarks = points(landmarks.allPoints)
 
         // Vision's left/right are anatomical; the template is by image position.
@@ -205,13 +217,21 @@ public enum FrameQualityGate {
     /// The face box must stay this far inside the frame edges.
     public static let edgeMargin: CGFloat = 0.01
 
-    public static func isUsable(_ f: FrameAnalysis) -> Bool {
-        guard f.faceCount == 1, f.embedding != nil, let box = f.boundingBox,
-              let yaw = f.yawDegrees, let pitch = f.pitchDegrees else { return false }
-        if let q = f.captureQuality, q < minimumQuality { return false }
-        guard abs(yaw) <= maximumYaw, abs(pitch) <= maximumPitch else { return false }
-        guard box.width >= minimumFaceWidth else { return false }
-        return box.minX >= edgeMargin && box.minY >= edgeMargin
-            && box.maxX <= 1 - edgeMargin && box.maxY <= 1 - edgeMargin
+    public static func isUsable(_ f: FrameAnalysis) -> Bool { problem(f) == nil }
+
+    /// Why a frame isn't usable (nil if it is). A missing pose is never a
+    /// reason on its own: the frame is judged on what is known.
+    public static func problem(_ f: FrameAnalysis) -> String? {
+        guard f.faceCount == 1 else { return "faces" }
+        guard f.embedding != nil else { return "unreadable" }
+        if let q = f.captureQuality, q < minimumQuality { return "quality" }
+        if let yaw = f.yawDegrees, abs(yaw) > maximumYaw { return "turned" }
+        if let pitch = f.pitchDegrees, abs(pitch) > maximumPitch { return "tilted" }
+        guard let box = f.boundingBox else { return nil }
+        if box.width < minimumFaceWidth { return "small" }
+        if box.minX < edgeMargin || box.minY < edgeMargin || box.maxX > 1 - edgeMargin || box.maxY > 1 - edgeMargin {
+            return "cut off"
+        }
+        return nil
     }
 }

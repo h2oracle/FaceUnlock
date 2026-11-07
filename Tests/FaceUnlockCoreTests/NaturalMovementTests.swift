@@ -105,6 +105,45 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         #expect(!droppedToZero)
     }
 
+    @Test func naturalBlinkWithSlightMovementPassesQuickly() throws {
+        // Small sway that alone is slow for parallax, plus one natural blink
+        // (≈150 ms) at 0.5 s.
+        let pose: (Double) -> SyntheticFace.Pose = { t in
+            SyntheticFace.Pose(yaw: 2.0 * sin(2 * .pi * 0.7 * t), pitch: 0.8 * sin(2 * .pi * 0.5 * t))
+        }
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: false, seed: UInt64(seed))
+            face.blink = { t in (0.5..<0.65).contains(t) ? 0.1 : 1 }
+            let r = run(&face, seconds: 4, pose: pose)
+            let t = try #require(r.unlockAt, "seed \(seed)")
+            #expect(t <= 1.3, "seed \(seed): passed at \(t)s, blinked \(r.last?.blinked ?? false)")
+            #expect(r.last?.blinked == true)
+        }
+    }
+
+    @Test func aPhotoCannotBlink() {
+        // A flat photo tilted hard towards/away from the camera squashes the
+        // eyes, but the whole face squashes with them: never a blink, never a pass.
+        let pose: (Double) -> SyntheticFace.Pose = { t in
+            SyntheticFace.Pose(yaw: 3 * sin(2 * .pi * 0.7 * t), pitch: 65 * max(0, sin(2 * .pi * 1.5 * t)))
+        }
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: true, seed: UInt64(seed))
+            face.blink = { _ in 0.1 } // ignored: a photo's eyes can't change
+            var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
+            var passed = false
+            var blinked = false
+            for i in 0..<300 {
+                let t = Double(i) / fps
+                let snap = e.observe(face.frame(time: t, pose: pose(t)))
+                if snap.shouldUnlock { passed = true }
+                if snap.blinked { blinked = true }
+            }
+            #expect(!passed, "seed \(seed)")
+            #expect(!blinked, "seed \(seed)")
+        }
+    }
+
     @Test func perfectlyStillRealHeadWaits() {
         var face = SyntheticFace(flat: false)
         #expect(run(&face, seconds: 5, pose: { _ in SyntheticFace.Pose() }).unlockAt == nil)

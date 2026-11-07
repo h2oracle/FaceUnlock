@@ -17,10 +17,14 @@ public struct FrameObservation: Sendable {
     /// False when the face is too turned, too small, cut off, low quality or
     /// couldn't be embedded: such a frame is neither a match nor a non-match.
     public var usable: Bool
+    /// Why it isn't usable (for diagnostics only).
+    public var unusableReason: String?
 
     public init(time: TimeInterval, faceCount: Int, score: MatchScore?, eyes: EyeSample?,
                 yawDegrees: Double?, pitchDegrees: Double?,
-                landmarks: [CGPoint]? = nil, interocular: Double? = nil, usable: Bool = true) {
+                landmarks: [CGPoint]? = nil, interocular: Double? = nil, usable: Bool = true,
+                unusableReason: String? = nil) {
+        self.unusableReason = unusableReason
         self.landmarks = landmarks
         self.interocular = interocular
         self.usable = usable
@@ -57,6 +61,7 @@ public struct UnlockEvaluator: Sendable {
         public var frameMatched: Bool
         /// One face, good enough to judge (see `FrameQualityGate`).
         public var frameUsable: Bool = false
+        public var frameUnusableReason: String?
         public var consecutiveMatches: Int
         public var requiredConsecutive: Int
         public var blinkState: BlinkDetector.State
@@ -99,6 +104,7 @@ public struct UnlockEvaluator: Sendable {
     private var lastScore: MatchScore?
     private var lastMatched = false
     private var lastUsable = false
+    private var lastUnusableReason: String?
     private var matchesSinceBlink = 0
     private var lastResetReason: ResetReason?
     /// Start of the current run of no-face / unusable frames.
@@ -141,6 +147,7 @@ public struct UnlockEvaluator: Sendable {
         lastScore = frame.score
         lastMatched = false
         lastUsable = frame.faceCount == 1 && frame.usable && frame.score != nil
+        lastUnusableReason = frame.faceCount == 1 && !lastUsable ? (frame.unusableReason ?? "unreadable") : nil
         lastResetReason = nil
         lastEyeRatio = nil
 
@@ -193,7 +200,10 @@ public struct UnlockEvaluator: Sendable {
             live = blinkLive
             liveProgress = (blink.hasBlinked ? 0.5 : 0) + (pose.isSatisfied ? 0.5 : 0)
         case .naturalMovement:
-            live = motion.isSatisfied
+            // Either 3D parallax, or a natural blink (in matched frames, with
+            // matched frames after it) plus slight head movement. A flat
+            // photo can do neither.
+            live = motion.isSatisfied || blinkLive
             liveProgress = live ? 1 : min(0.95, motion.progress)
         case .off:
             live = true
@@ -206,6 +216,7 @@ public struct UnlockEvaluator: Sendable {
             score: lastScore,
             frameMatched: lastMatched,
             frameUsable: lastUsable,
+            frameUnusableReason: lastUnusableReason,
             consecutiveMatches: counter.run,
             requiredConsecutive: counter.required,
             blinkState: blink.state,

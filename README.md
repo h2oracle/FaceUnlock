@@ -148,6 +148,9 @@ window.
     yourself by holding up a printed photo in the Test step. Curved or bent
     prints, videos and masks may pass. A still real head waits until you
     move slightly; with normal movement it passes in about 0.5–1.5 s.
+    A natural blink also counts, along with a little head movement and
+    recognition before and after it, so it often passes sooner. A blink is
+    never required.
   - *Blink + movement*: a natural blink plus slight head movement. This is the
     strongest webcam check, but a video of you can still pass.
   - *Off*: face match only. A photo of you can unlock. Not recommended.

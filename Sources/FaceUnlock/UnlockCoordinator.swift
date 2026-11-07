@@ -377,7 +377,14 @@ final class UnlockCoordinator {
             }
             return
         }
-        guard now - lockStartedAt >= Self.gracePeriodAfterLock else { blocked("grace period after locking"); return }
+        // Automatic mode starts the camera during the grace period (it takes
+        // ~0.7 s to deliver frames) but frames before the grace ends are
+        // discarded. Input-triggered scans still wait for the grace to pass,
+        // so the lock keystroke itself can't start one.
+        let earlyStart = trigger == .tick && gate.mode == .automatic
+        guard earlyStart || now - lockStartedAt >= Self.gracePeriodAfterLock else {
+            blocked("grace period after locking"); return
+        }
         if trigger == .tick && now < notReadyUntil { return }
         let state = SessionState.current()
         guard state.screenLocked, state.onConsole, state.loginDone else {
@@ -423,6 +430,7 @@ final class UnlockCoordinator {
 
         let processor = FaceSessionProcessor(
             analyzer: analyzer, template: template, policy: policy, liveness: liveness,
+            ignoreFramesBefore: lockStartedAt + Self.gracePeriodAfterLock,
             onReadout: { [weak self] readout in
                 let faces = readout.snapshot.faceCount
                 let matched = readout.snapshot.frameMatched

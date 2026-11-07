@@ -53,6 +53,31 @@ public enum LandmarkGeometry {
         return CGPoint(x: points.map(\.x).reduce(0, +) / n, y: points.map(\.y).reduce(0, +) / n)
     }
 
+    /// Rough head pose from 2D landmarks, used when Vision omits it.
+    /// Yaw: sideways offset of the nose tip from the eye midpoint (the tip
+    /// sits ≈0.55 inter-ocular distances in front of the eye plane). Pitch:
+    /// where the tip sits between the eye line and the mouth (≈0.6 when
+    /// facing the camera). In-plane roll is removed first. Degrees.
+    public static func estimatePose(leftEye: CGPoint, rightEye: CGPoint, noseTip: CGPoint, mouth: CGPoint)
+        -> (yaw: Double, pitch: Double)? {
+        let (l, r) = leftEye.x <= rightEye.x ? (leftEye, rightEye) : (rightEye, leftEye)
+        let iod = hypot(r.x - l.x, r.y - l.y)
+        guard iod > .ulpOfOne else { return nil }
+        let roll = atan2(r.y - l.y, r.x - l.x)
+        let mid = CGPoint(x: (l.x + r.x) / 2, y: (l.y + r.y) / 2)
+        func unroll(_ p: CGPoint) -> CGPoint {
+            let dx = p.x - mid.x, dy = p.y - mid.y
+            return CGPoint(x: dx * cos(-roll) - dy * sin(-roll), y: dx * sin(-roll) + dy * cos(-roll))
+        }
+        let tip = unroll(noseTip), m = unroll(mouth)
+        let sideways = Double(tip.x / (0.55 * iod))
+        let yaw = asin(max(-1, min(1, sideways))) * 180 / .pi
+        guard abs(m.y) > .ulpOfOne else { return nil }
+        let along = Double(tip.y / m.y) // 0 at the eye line, 1 at the mouth
+        let pitch = asin(max(-1, min(1, (along - 0.6) / 0.8))) * 180 / .pi
+        return (yaw, pitch)
+    }
+
     /// Eye-line-to-mouth distance divided by inter-ocular distance.
     public static func faceShape(leftEye: CGPoint, rightEye: CGPoint, mouth: CGPoint) -> Double? {
         let interocular = hypot(leftEye.x - rightEye.x, leftEye.y - rightEye.y)

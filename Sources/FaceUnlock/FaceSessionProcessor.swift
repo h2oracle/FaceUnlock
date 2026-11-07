@@ -36,7 +36,11 @@ final class FaceSessionProcessor: @unchecked Sendable {
     private var _diagnostics = AttemptDiagnostics()
     private var summarizer: DiagnosticsSummarizer?
 
+    /// Frames with an earlier timestamp (system uptime) are dropped unseen.
+    private let ignoreFramesBefore: TimeInterval
+
     init(analyzer: FaceAnalyzer, template: FaceTemplate, policy: MatchPolicy, liveness: LivenessMode,
+         ignoreFramesBefore: TimeInterval = 0,
          onReadout: (@Sendable (LiveReadout) -> Void)? = nil,
          onDiagnostics: (@Sendable (String) -> Void)? = nil,
          stopsOnPass: Bool = true,
@@ -45,6 +49,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
         self.template = template
         self.policy = policy
         self.liveness = liveness
+        self.ignoreFramesBefore = ignoreFramesBefore
         self.onDiagnostics = onDiagnostics
         self.onReadout = onReadout
         self.onPass = onPass
@@ -74,6 +79,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
     }
 
     func process(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) {
+        guard time >= ignoreFramesBefore else { return }
         let shouldReset: Bool = lock.withLock {
             let r = resetRequested
             resetRequested = false
@@ -93,7 +99,8 @@ final class FaceSessionProcessor: @unchecked Sendable {
             pitchDegrees: analysis.pitchDegrees,
             landmarks: analysis.landmarks,
             interocular: analysis.interocular,
-            usable: analysis.isUsable
+            usable: analysis.isUsable,
+            unusableReason: FrameQualityGate.problem(analysis)
         )
         let snapshot = evaluator.observe(observation)
         let eyeMean: Double? = {
