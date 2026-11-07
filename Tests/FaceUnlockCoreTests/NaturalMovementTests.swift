@@ -276,8 +276,15 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
     }
 
     @Test func absoluteZeroBaselineWasTheBug() {
-        // What 111cadd did: attention measured from pitch 0 never passes.
-        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: 0), pose: lookingAtScreen) == nil)
+        // What 111cadd did: attention measured from pitch 0. With a large
+        // camera offset (−30°) that never passes.
+        let steep: (Double) -> SyntheticFace.Pose = { t in
+            var p = normalHead(t)
+            p.pitch -= 30
+            return p
+        }
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: 0), pose: steep) == nil)
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -25), pose: steep) != nil)
     }
 
     @Test func oldTemplateWithoutBaselineLearnsItInSession() throws {
@@ -287,7 +294,7 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         }
     }
 
-    @Test func turnedMoreThanFifteenDegreesFromBaselineNeverUnlocks() {
+    @Test func turnedMoreThanEighteenDegreesFromBaselineNeverUnlocks() {
         // Baseline −20° pitch; the owner turns 30° sideways (strong score).
         let turned: (Double) -> SyntheticFace.Pose = { t in
             var p = self.lookingAtScreen(t)
@@ -295,13 +302,35 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
             return p
         }
         #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: turned) == nil)
-        // Looking far down (−20° more than the baseline) doesn't count either.
+        // Looking far down (−25° more than the baseline) doesn't count either.
         let down: (Double) -> SyntheticFace.Pose = { t in
             var p = self.lookingAtScreen(t)
-            p.pitch -= 20
+            p.pitch -= 25
             return p
         }
         #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: down) == nil)
+    }
+
+    @Test func handOnChinCannotPoisonTheSessionBaseline() throws {
+        // 16:42:53: first ~1.5 s with the head turned and down (hand on chin),
+        // then frontal (yaw −12, pitch +6). The turned frames are outside the
+        // ±20° learning range, so the baseline comes from the frontal ones.
+        let pose: (Double) -> SyntheticFace.Pose = { t in
+            t < 1.5
+                ? SyntheticFace.Pose(yaw: -38 + 2 * sin(t * 5), pitch: -18 + sin(t * 3))
+                : SyntheticFace.Pose(yaw: -12 + 4 * sin(2 * .pi * 0.5 * t), pitch: 6 + 2 * sin(2 * .pi * 0.4 * t))
+        }
+        let t = try #require(runAttention(baseline: nil, seconds: 6, pose: pose))
+        #expect(t <= 3.5, "unlocked at \(t)s")
+    }
+
+    @Test func learnedBaselineMovesSlowly() {
+        let a = PoseBaseline.blended(nil, with: PoseBaseline(yaw: -10, pitch: 6))
+        #expect(a == PoseBaseline(yaw: -10, pitch: 6))
+        let b = PoseBaseline.blended(a, with: PoseBaseline(yaw: -20, pitch: 6))
+        #expect(abs(b.yaw - -12) < 1e-9) // α = 0.2
+        let c = PoseBaseline.blended(b, with: PoseBaseline(yaw: -90, pitch: -90))
+        #expect(c.yaw >= -PoseBaseline.plausibleYaw && c.pitch >= -PoseBaseline.plausiblePitch)
     }
 
     @Test func sessionLearnedBaselineCannotAdoptATurnedAwayPose() {
@@ -352,7 +381,7 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
             let snap = e.observe(face.frame(time: t, pose: SyntheticFace.Pose(yaw: yaw, pitch: 1)))
             if snap.shouldUnlock { unlockedYaw = yaw }
         }
-        #expect(unlockedYaw == nil || unlockedYaw! <= 12, "unlocked at yaw \(unlockedYaw ?? -1)")
+        #expect(unlockedYaw == nil || unlockedYaw! <= 18, "unlocked at yaw \(unlockedYaw ?? -1)")
     }
 
     @Test func borderlineScoresNeverUnlock() {

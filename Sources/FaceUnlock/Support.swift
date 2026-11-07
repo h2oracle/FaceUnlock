@@ -181,15 +181,19 @@ enum SetupStore {
     private static let lastAttemptKey = "lastAttemptRecord"
     private static let testPassedKey = "testPassedTemplateSHA256"
     private static let launchChoiceKey = "launchAtLoginChosen"
-    private static let testBaselineKey = "testBaselinePose"
+    private static let learnedBaselineKey = "learnedBaselinePose"
 
-    /// How the owner faced the screen during the last Test PASS. Only used
-    /// for templates enrolled before the baseline was stored in them. It's a
-    /// convenience, not a security value: a wrong one can only make
-    /// attention stricter or looser within the ±25° plausible range.
-    static var testBaselinePose: PoseBaseline? {
-        get { defaults.data(forKey: testBaselineKey).flatMap { try? JSONDecoder().decode(PoseBaseline.self, from: $0) } }
-        set { defaults.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: testBaselineKey) }
+    /// How the owner faces the screen, learned from successful unlocks and
+    /// Test passes (moving average). Only used for templates enrolled before
+    /// the baseline was stored in them. It's a convenience, not a security
+    /// value: the clamp (±20° yaw, ±25° pitch) and the score margin bound it.
+    static var learnedBaselinePose: PoseBaseline? {
+        get { defaults.data(forKey: learnedBaselineKey).flatMap { try? JSONDecoder().decode(PoseBaseline.self, from: $0) } }
+        set { defaults.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: learnedBaselineKey) }
+    }
+
+    static func refineLearnedBaseline(with pose: PoseBaseline) {
+        learnedBaselinePose = PoseBaseline.blended(learnedBaselinePose, with: pose)
     }
 
     /// Most recent lock-screen attempt (time, outcome, reason; no secrets).

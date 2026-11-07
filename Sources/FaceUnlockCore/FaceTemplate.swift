@@ -149,8 +149,15 @@ public struct PoseBaseline: Codable, Equatable, Sendable {
     /// A baseline further than this from the camera axis isn't plausible
     /// for someone looking at the screen, so it's clamped. Pitch can be large
     /// because the camera sits above the screen; yaw only comes from posture.
-    public static let plausibleYaw: Double = 12
+    public static let plausibleYaw: Double = 20
     public static let plausiblePitch: Double = 25
+
+    /// Exponential moving average towards `sample` (first sample if `old` is nil).
+    public static func blended(_ old: PoseBaseline?, with sample: PoseBaseline, alpha: Double = 0.2) -> PoseBaseline {
+        guard let old else { return sample.clamped }
+        return PoseBaseline(yaw: old.yaw + alpha * (sample.yaw - old.yaw),
+                            pitch: old.pitch + alpha * (sample.pitch - old.pitch)).clamped
+    }
 
     public var clamped: PoseBaseline {
         PoseBaseline(yaw: min(max(yaw, -Self.plausibleYaw), Self.plausibleYaw),

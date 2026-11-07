@@ -81,6 +81,9 @@ final class UnlockCoordinator {
     /// The password was typed in full but the unlock hasn't been confirmed
     /// yet. Survives sleep/cancel so a stale password is never retyped.
     private var awaitingUnlockConfirmation = false
+    /// Pose of the frames that produced the current pass; refines the
+    /// learned baseline once the unlock is confirmed.
+    private var pendingPassPose: PoseBaseline?
     private var typingCancellation: TypingCancellation?
     private var lastIdle: TimeInterval = .infinity
     private var notReadyUntil: TimeInterval = 0
@@ -208,6 +211,11 @@ final class UnlockCoordinator {
             // Screen unlocked while (or just after) we typed: it worked.
             logTiming(unlockedAt: t)
             record(.unlocked)
+            if let pose = pendingPassPose {
+                SetupStore.refineLearnedBaseline(with: pose)
+                diag(String(format: "baseline refined from unlock pose %.1f/%.1f", pose.yaw, pose.pitch))
+            }
+            pendingPassPose = nil
             awaitingUnlockConfirmation = false
         } else if let processor {
             processor.flushDiagnostics()
@@ -439,7 +447,7 @@ final class UnlockCoordinator {
         let processor = FaceSessionProcessor(
             analyzer: analyzer, template: template, policy: policy, liveness: liveness,
             ignoreFramesBefore: lockStartedAt + Self.gracePeriodAfterLock,
-            attentionBaseline: template.baselinePose ?? SetupStore.testBaselinePose,
+            attentionBaseline: template.baselinePose ?? SetupStore.learnedBaselinePose,
             onReadout: { [weak self] readout in
                 let faces = readout.snapshot.faceCount
                 let matched = readout.snapshot.frameMatched
@@ -579,6 +587,7 @@ final class UnlockCoordinator {
     private func scanPassed(id: Int) {
         guard id == scanID, let processor else { return }
         timing?.match = now
+        pendingPassPose = template?.baselinePose == nil ? processor.passPose : nil
         processor.flushDiagnostics()
         stopScan()
         diag("scan ended: face matched with liveness")

@@ -28,9 +28,12 @@ has physical access to your Mac.
   movement is designed to reject flat photos but has been validated on
   simulated data only. Test it with a printed photo in the Test step.
 - Unlocking while you're not looking (e.g. turned away or eyes closed): the
-  final 5 matched frames must be attentive: within 15° of the owner's
-  enrolled screen-facing pose (clamped to ±12° yaw and ±25° pitch from the
-  camera axis), eyes open, and score ≥ threshold + 0.05.
+  final 5 matched frames must be attentive: within 18° of the owner's
+  screen-facing pose (enrolled, or learned from successful unlocks; clamped
+  to ±20° yaw and ±25° pitch from the camera axis), eyes open, and
+  score ≥ threshold + 0.05. The learned pose is stored in preferences. A
+  same-user process could change it, but only within that clamp and never
+  past the score margin.
 - Repeated attempts at the lock screen. Failed looks are counted per scan
   (3, then a pause until input re-arms it) and per lock session (5), and covering the lens or adding a second face
   doesn't reset the count. A matching face that never passes liveness also

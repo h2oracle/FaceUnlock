@@ -56,8 +56,8 @@ public struct FrameObservation: Sendable {
 public struct AttentionPolicy: Equatable, Sendable {
     public var requiredFrames = 5
     /// Allowed deviation (degrees) from the owner's baseline pose.
-    public var maximumYaw: Double = 15
-    public var maximumPitch: Double = 15
+    public var maximumYaw: Double = 18
+    public var maximumPitch: Double = 18
     /// How this owner faces the screen (pose relative to the camera).
     public var baseline = PoseBaseline(yaw: 0, pitch: 0)
     /// Each eye must be at least this fraction of its calibrated open level…
@@ -142,6 +142,9 @@ public struct UnlockEvaluator: Sendable {
         public var latestPitch: Double?
         public var poseFromLandmarks = false
         public var attentionBaseline: PoseBaseline?
+        /// Median pose of the current attentive run (set once it's long
+        /// enough); after an unlock it refines the persisted baseline.
+        public var attentivePose: PoseBaseline?
     }
 
     public let policy: MatchPolicy
@@ -154,6 +157,10 @@ public struct UnlockEvaluator: Sendable {
     private var latestYaw: Double?
     private var latestPitch: Double?
     private var latestPoseEstimated = false
+    private var attentivePoses: [(yaw: Double, pitch: Double)] = []
+    /// Session learning only uses frames this close to the camera axis, so a
+    /// hand-on-chin or turned pose can't become the baseline.
+    public static let sessionLearningRange: Double = 20
     private var attentiveRun = 0
     private var lastAttentionProblem: String?
     public let livenessMode: LivenessMode
@@ -200,6 +207,7 @@ public struct UnlockEvaluator: Sendable {
     /// frames score highest), clamped to a plausible range.
     private mutating func learnSessionBaseline(score: MatchScore, yaw: Double?, pitch: Double?) {
         guard attention == nil, let yaw, let pitch,
+              abs(yaw) <= Self.sessionLearningRange, abs(pitch) <= Self.sessionLearningRange,
               score.centroid >= policy.threshold + AttentionPolicy().scoreMargin else { return }
         strongPoses.append((score.centroid, yaw, pitch))
         guard strongPoses.count >= Self.sessionBaselineFrames else { return }
@@ -213,6 +221,7 @@ public struct UnlockEvaluator: Sendable {
         if hasEvidence { lastResetReason = reason }
         counter.reset()
         attentiveRun = 0
+        attentivePoses.removeAll()
         blink.reset()
         pose.reset()
         motion.reset()
@@ -270,6 +279,12 @@ public struct UnlockEvaluator: Sendable {
                     lastAttentionProblem = "learning how you face the screen"
                 }
                 attentiveRun = lastAttentionProblem == nil ? attentiveRun + 1 : 0
+                if lastAttentionProblem == nil, let y = frame.yawDegrees, let p = frame.pitchDegrees {
+                    attentivePoses.append((y, p))
+                    if attentivePoses.count > 15 { attentivePoses.removeFirst() }
+                } else {
+                    attentivePoses.removeAll()
+                }
                 let blinkedBefore = blink.hasBlinked
                 if let eyes = frame.eyes {
                     if let r = blink.ratios(for: eyes) { lastEyeRatio = min(r.left, r.right) }
@@ -343,7 +358,8 @@ public struct UnlockEvaluator: Sendable {
             latestYaw: latestYaw,
             latestPitch: latestPitch,
             poseFromLandmarks: latestPoseEstimated,
-            attentionBaseline: attention?.baseline
+            attentionBaseline: attention?.baseline,
+            attentivePose: attentiveRun >= AttentionPolicy().requiredFrames ? PoseBaseline.median(attentivePoses) : nil
         )
     }
 }

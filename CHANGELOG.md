@@ -17,7 +17,7 @@ First public release.
   landmarks as the head turns) to reject flat photos, still or moved. A
   natural blink in recognised frames with slight movement also passes.
 - Attention requirement: the final 5 matched frames must face the screen
-  (within 15° of the owner's enrolled screen-facing pose) with both eyes
+  (within 18° of the owner's enrolled or learned screen-facing pose) with both eyes
   open and a score at least 0.05
   above the threshold. Loose legacy thresholds get a prominent warning.
 - Frames are judged by a quality gate (angle, size, cut off, capture

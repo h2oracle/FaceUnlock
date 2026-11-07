@@ -1055,12 +1055,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let digest = templateDigest
         let processor = FaceSessionProcessor(analyzer: analyzer, template: template, policy: policy,
                                              liveness: verifiedLiveness,
-                                             attentionBaseline: template.baselinePose ?? SetupStore.testBaselinePose,
+                                             attentionBaseline: template.baselinePose ?? SetupStore.learnedBaselinePose,
                                              onReadout: { [weak self] readout in
             Task { @MainActor in
+                let wasPassed = model.passed
                 model.apply(readout)
-                if readout.snapshot.shouldUnlock, template.baselinePose == nil, let b = model.strongPoseMedian {
-                    SetupStore.testBaselinePose = b.clamped
+                // Once per PASS: refine the learned baseline from this test.
+                if !wasPassed, readout.snapshot.shouldUnlock, template.baselinePose == nil,
+                   let b = readout.snapshot.attentivePose ?? model.strongPoseMedian {
+                    SetupStore.refineLearnedBaseline(with: b)
                 }
                 if let typical = model.typicalScore { self?.setupModel.typicalScore = typical }
                 if readout.snapshot.shouldUnlock, let digest, SetupStore.testPassedForDigest != digest {

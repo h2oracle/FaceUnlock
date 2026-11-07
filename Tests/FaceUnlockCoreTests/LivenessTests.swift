@@ -234,8 +234,8 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         let good = MatchScore(centroid: 0.8, bestSample: 0.8)
         let eyes = EyeSample(time: 0, left: 0.15, right: 0.15, faceShape: 1.2)
         #expect(a.problem(score: good, threshold: 0.55, yaw: 3, pitch: -4, eyes: eyes, eyeRatios: (1, 1)) == nil)
-        #expect(a.problem(score: good, threshold: 0.55, yaw: 20, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
-        #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 18, eyes: eyes, eyeRatios: (1, 1)) != nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 25, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 20, eyes: eyes, eyeRatios: (1, 1)) != nil)
         #expect(a.problem(score: good, threshold: 0.55, yaw: nil, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
         #expect(a.problem(score: MatchScore(centroid: 0.58, bestSample: 0.9), threshold: 0.55, yaw: 0, pitch: 0,
                           eyes: eyes, eyeRatios: (1, 1)) == "weak match")

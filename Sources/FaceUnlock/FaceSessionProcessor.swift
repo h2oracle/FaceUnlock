@@ -35,6 +35,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
     private var _sawFace = false
     private var _diagnostics = AttemptDiagnostics()
     private var _firstCameraFrameAt: TimeInterval?
+    private var _passPose: PoseBaseline?
     private var summarizer: DiagnosticsSummarizer?
 
     /// Frames with an earlier timestamp (system uptime) are dropped unseen.
@@ -70,6 +71,8 @@ final class FaceSessionProcessor: @unchecked Sendable {
     var sawFace: Bool { lock.withLock { _sawFace } }
     /// Uptime of the first frame the camera delivered (even if discarded).
     var firstCameraFrameAt: TimeInterval? { lock.withLock { _firstCameraFrameAt } }
+    /// Median pose of the attentive frames that produced the pass.
+    var passPose: PoseBaseline? { lock.withLock { _passPose } }
     /// Whole-attempt summary used to explain a failure.
     var diagnostics: AttemptDiagnostics { lock.withLock { _diagnostics } }
 
@@ -133,6 +136,7 @@ final class FaceSessionProcessor: @unchecked Sendable {
                                   yaw: analysis.yawDegrees, pitch: analysis.pitchDegrees))
         }
 
+        if snapshot.shouldUnlock, let pose = snapshot.attentivePose { lock.withLock { _passPose = pose } }
         if snapshot.shouldUnlock && !stopsOnPass {
             onPass()
         } else if snapshot.shouldUnlock {
