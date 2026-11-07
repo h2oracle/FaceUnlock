@@ -57,6 +57,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.start()
     }
 
+    /// Opening the app again (Spotlight, Finder, `open`) pops the menu up at the
+    /// mouse pointer — the menu-bar icon can be hidden behind the notch when the
+    /// menu bar is full.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NSApp.activate()
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        return false
+    }
+
     private func updateIcon() {
         let name = Settings.isEnabled && readyProblems.isEmpty ? "faceid" : "face.dashed"
         let image = NSImage(systemSymbolName: name, accessibilityDescription: "FaceUnlock")
