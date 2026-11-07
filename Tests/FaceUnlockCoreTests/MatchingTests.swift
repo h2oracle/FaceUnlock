@@ -102,6 +102,20 @@ import Testing
         #expect(l.totalFailures == 0)
     }
 
+    @Test func faceTimeCapStopsTheLockSession() {
+        var l = AttemptLockout()
+        for _ in 0..<1199 { l.recordFaceTime(0.1) }
+        #expect(!l.isLockedOut)
+        l.recordFaceTime(0.2)
+        #expect(l.faceTimeExhausted)
+        #expect(l.isLockedOut)
+        l.displayWoke()
+        #expect(!l.canScan)
+        l.startNewLockSession()
+        #expect(l.canScan)
+        #expect(l.faceSeconds == 0)
+    }
+
     @Test func rejectedPasswordLocksOutImmediately() {
         var l = AttemptLockout()
         l.recordPasswordRejected()

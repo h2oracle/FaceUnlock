@@ -11,15 +11,18 @@ Requirements: macOS 15 or later, Xcode with a Swift 6 toolchain.
 swift build          # debug build
 swift test           # unit tests (no camera, Keychain or permissions needed)
 ./build.sh           # release app bundle in build/FaceUnlock.app
-FACEUNLOCK_SIGN_ID=- ./build.sh   # force ad-hoc signing
 ./release.sh         # zip + SHA-256 in dist/ (notarises only if configured)
 ```
 
-`build.sh` signs with `$FACEUNLOCK_SIGN_ID`, else the first Developer ID
-Application identity, else the first Apple Development identity, else ad-hoc.
-With a stable identity, Keychain access and the Camera/Accessibility grants
-survive rebuilds; with ad-hoc signing they have to be granted again after
-every build.
+`build.sh` signs **ad-hoc** by default. To sign local builds with your own
+identity, copy `signing.local.env.example` to `signing.local.env` (git-ignored)
+and set `FACEUNLOCK_SIGN_ID` to a hash from
+`security find-identity -v -p codesigning`, or export `FACEUNLOCK_SIGN_ID` in
+your shell. With a stable identity, Keychain access and the
+Camera/Accessibility grants survive rebuilds; with ad-hoc signing they have to
+be granted again after every build. `release.sh` only notarises when you've
+explicitly chosen a Developer ID Application identity and set
+`FACEUNLOCK_NOTARY_PROFILE`.
 
 Never run the unlock flow against your own lock screen from a debugger
 session you can't interrupt, and never commit diagnostics logs.

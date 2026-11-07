@@ -90,7 +90,9 @@ final class FaceSessionProcessor: @unchecked Sendable {
             score: analysis.faceCount == 1 ? score : nil,
             eyes: analysis.eyeSample(at: time),
             yawDegrees: analysis.yawDegrees,
-            pitchDegrees: analysis.pitchDegrees
+            pitchDegrees: analysis.pitchDegrees,
+            landmarks: analysis.landmarks,
+            interocular: analysis.interocular
         )
         let snapshot = evaluator.observe(observation)
         let eyeMean: Double? = {

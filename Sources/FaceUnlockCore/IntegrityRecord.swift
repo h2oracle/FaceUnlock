@@ -11,11 +11,20 @@ public struct IntegrityRecord: Codable, Equatable, Sendable {
     /// nil in records written before the setting existed; such records were
     /// made when blink + movement was the only behaviour.
     public var livenessMode: LivenessMode?
+    /// Whether face unlock is switched on. nil in older records, which
+    /// counts as off: turning it on again needs the login password.
+    public var enabled: Bool?
 
-    public init(templateSHA256: String?, threshold: Float, livenessMode: LivenessMode) {
+    public init(templateSHA256: String?, threshold: Float, livenessMode: LivenessMode, enabled: Bool = false) {
         self.templateSHA256 = templateSHA256
         self.threshold = threshold
         self.livenessMode = livenessMode
+        self.enabled = enabled
+    }
+
+    /// Face unlock only runs when both the preference and this record say on.
+    public func isEffectivelyEnabled(preference: Bool) -> Bool {
+        preference && enabled == true
     }
 
     /// The liveness mode this record vouches for.

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// What the vision pipeline extracted from one camera frame.
@@ -9,9 +10,16 @@ public struct FrameObservation: Sendable {
     public var eyes: EyeSample?
     public var yawDegrees: Double?
     public var pitchDegrees: Double?
+    /// All facial landmarks in image coordinates (stable order per frame),
+    /// and the inter-ocular distance in the same units. Used for parallax.
+    public var landmarks: [CGPoint]?
+    public var interocular: Double?
 
     public init(time: TimeInterval, faceCount: Int, score: MatchScore?, eyes: EyeSample?,
-                yawDegrees: Double?, pitchDegrees: Double?) {
+                yawDegrees: Double?, pitchDegrees: Double?,
+                landmarks: [CGPoint]? = nil, interocular: Double? = nil) {
+        self.landmarks = landmarks
+        self.interocular = interocular
         self.time = time
         self.faceCount = faceCount
         self.score = score
@@ -60,9 +68,11 @@ public struct UnlockEvaluator: Sendable {
         /// (≈1 open; a blink needs both below 0.60). nil while calibrating.
         public var eyeRatio: Double? = nil
         public var livenessMode: LivenessMode = .blinkAndMovement
-        /// Natural-movement numbers (see `MicroMotionCheck`).
-        public var motionPoseRange: Double = 0
-        public var motionEyeJitter: Double = 0
+        /// Natural-movement numbers (see `NaturalMovementCheck`): head-turn
+        /// between the two ends of the window (degrees) and the averaged
+        /// non-planar landmark residual (fraction of inter-ocular distance).
+        public var motionRotation: Double = 0
+        public var motionParallax: Double = 0
         public var motionSeconds: Double = 0
         /// Whether the active liveness mode is satisfied right now.
         public var livenessSatisfied: Bool = false
@@ -72,7 +82,7 @@ public struct UnlockEvaluator: Sendable {
 
     public let policy: MatchPolicy
     public let livenessMode: LivenessMode
-    private var motion: MicroMotionCheck
+    private var motion: NaturalMovementCheck
     private var counter: ConsecutiveMatchCounter
     private var blink: BlinkDetector
     private var pose: PoseVariationCheck
@@ -89,10 +99,10 @@ public struct UnlockEvaluator: Sendable {
                 liveness: LivenessMode = .blinkAndMovement,
                 blinkConfig: BlinkDetector.Config = .init(),
                 poseConfig: PoseVariationCheck.Config = .init(),
-                motionConfig: MicroMotionCheck.Config = .init()) {
+                motionConfig: NaturalMovementCheck.Config = .init()) {
         self.policy = policy
         self.livenessMode = liveness
-        self.motion = MicroMotionCheck(config: motionConfig)
+        self.motion = NaturalMovementCheck(config: motionConfig)
         self.counter = ConsecutiveMatchCounter(required: policy.requiredConsecutive)
         self.blink = BlinkDetector(config: blinkConfig)
         self.pose = PoseVariationCheck(config: poseConfig)
@@ -141,7 +151,7 @@ public struct UnlockEvaluator: Sendable {
                 }
                 pose.observe(yawDegrees: frame.yawDegrees, pitchDegrees: frame.pitchDegrees)
                 motion.observe(time: frame.time, yawDegrees: frame.yawDegrees, pitchDegrees: frame.pitchDegrees,
-                               eyeOpenness: frame.eyes.map { ($0.left + $0.right) / 2 })
+                               landmarks: frame.landmarks, interocular: frame.interocular)
             } else {
                 // Not the owner (or couldn't tell): start over completely.
                 resetEvidence(frame.score == nil ? .noEmbedding : .noMatch)
@@ -185,8 +195,8 @@ public struct UnlockEvaluator: Sendable {
             resetReason: lastResetReason,
             eyeRatio: lastEyeRatio,
             livenessMode: livenessMode,
-            motionPoseRange: motion.poseRange,
-            motionEyeJitter: motion.eyeJitter,
+            motionRotation: motion.rotation,
+            motionParallax: motion.parallax,
             motionSeconds: motion.duration,
             livenessSatisfied: live,
             progress: unlock ? 1 : (matchProgress + liveProgress) / 2

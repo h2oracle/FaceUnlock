@@ -17,6 +17,10 @@ public struct FrameAnalysis: @unchecked Sendable {
     public var leftEyeOpenness: Double?
     public var rightEyeOpenness: Double?
     public var faceShape: Double?
+    /// All landmarks (Vision's full constellation) in image coordinates.
+    public var landmarks: [CGPoint]?
+    /// Distance between the eye centres, in image coordinates.
+    public var interocular: Double?
     public var embedding: [Float]?
 
     public static let none = FrameAnalysis(faceCount: 0)
@@ -150,6 +154,8 @@ public final class FaceAnalyzer: @unchecked Sendable {
               let mouthLeft = lips.min(by: { $0.x < $1.x }),
               let mouthRight = lips.max(by: { $0.x < $1.x }) else { return result }
         result.faceShape = LandmarkGeometry.faceShape(leftEye: eyeA, rightEye: eyeB, mouth: mouth)
+        result.interocular = Double(hypot(eyeA.x - eyeB.x, eyeA.y - eyeB.y))
+        result.landmarks = points(landmarks.allPoints)
 
         // Vision's left/right are anatomical; the template is by image position.
         let imageLeftEye = eyeA.x <= eyeB.x ? eyeA : eyeB

@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         coordinator = UnlockCoordinator(camera: camera, analyzer: analyzer)
         coordinator.template = template
-        coordinator.isEnabled = { Settings.isEnabled }
+        coordinator.isEnabled = { [weak self] in self?.isEffectivelyEnabled ?? false }
         coordinator.startMode = { Settings.scanStartMode }
         // Note: `self?.integrityProblem ?? x` would flatten the String?? and turn
         // "no problem" (nil) into x — so unwrap self explicitly.
@@ -61,7 +61,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.policy = { [weak self] in self?.verifiedPolicy ?? MatchPolicy() }
         coordinator.liveness = { [weak self] in self?.verifiedLiveness ?? .blinkAndMovement }
         coordinator.onStatusChange = { [weak self] in self?.updateIcon() }
-        coordinator.onLockSessionBegan = { [weak self] in self?.stopCameraUse() }
+        coordinator.onLockSessionBegan = { [weak self] in
+            // A screen lock ends any password-reuse window.
+            self?.setupModel.verifiedAt = nil
+            self?.stopCameraUse()
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setupModel.verifiedAt = nil }
+            }
+        }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setupModel.verifiedAt = nil }
+        }
         coordinator.onAttemptRecorded = { [weak self] record in
             SetupStore.lastAttempt = record
             self?.refreshSetup()
@@ -86,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateIcon() {
-        let name = Settings.isEnabled && readyProblems.isEmpty ? "faceid" : "face.dashed"
+        let name = isEffectivelyEnabled && readyProblems.isEmpty ? "faceid" : "face.dashed"
         let image = NSImage(systemSymbolName: name, accessibilityDescription: "FaceUnlock")
         image?.isTemplate = true
         statusItem?.button?.image = image
@@ -121,18 +136,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Reads the integrity record and checks the password is readable
     /// without UI, off the main thread (each read has its own timeout).
     private func reloadKeychainState() {
-        Task.detached(priority: .utility) { [weak self] in
-            let record = try? PasswordVault.readIntegrity()
-            var readable = true
-            if PasswordVault.passwordExists() {
-                do {
-                    let secret = try PasswordVault.readPassword()
-                    secret.wipe()
-                } catch {
-                    readable = false
+        Task { @MainActor [weak self] in
+            let (record, readable) = await Task.detached(priority: .utility) { () -> (IntegrityRecord?, Bool) in
+                let record = try? PasswordVault.readIntegrity()
+                var readable = true
+                if PasswordVault.passwordExists() {
+                    do {
+                        let secret = try PasswordVault.readPassword()
+                        secret.wipe()
+                    } catch {
+                        readable = false
+                    }
                 }
-            }
-            await MainActor.run {
+                return (record, readable)
+            }.value
+            do {
                 guard let self else { return }
                 // Records written before the liveness setting existed vouch for
                 // blink + movement; keep that until the user picks another mode.
@@ -162,12 +180,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func saveIntegrity() throws {
-        let record = IntegrityRecord(templateSHA256: templateDigest, threshold: Settings.matchThreshold,
-                                     livenessMode: Settings.livenessMode)
+    /// On only when the preference AND the Keychain record say so, and the
+    /// record matches the template and settings.
+    private var isEffectivelyEnabled: Bool {
+        guard let integrity, integrityProblem == nil else { return false }
+        return integrity.isEffectivelyEnabled(preference: Settings.isEnabled)
+    }
+
+    enum IntegrityError: Error, CustomStringConvertible {
+        case notVerified
+        var description: String {
+            "The enrolled face or settings don't match the Keychain record. Re-enrol your face first."
+        }
+    }
+
+    /// Changes one or more fields of the *verified* Keychain record (never
+    /// re-blessing values from UserDefaults or the template file) and saves
+    /// it. Refuses while anything doesn't match the record; only enrolment
+    /// may write a new template hash (`saveIntegrityAfterEnrolment`).
+    private func updateIntegrity(_ change: (inout IntegrityRecord) -> Void) throws {
+        guard var record = integrity, integrityProblem == nil else { throw IntegrityError.notVerified }
+        change(&record)
         try PasswordVault.saveIntegrity(record)
         integrity = record
         integrityLoaded = true
+        // Keep the preferences in step with what the record now vouches for.
+        Settings.matchThreshold = record.threshold
+        Settings.livenessMode = record.effectiveLivenessMode
+        Settings.isEnabled = record.enabled == true
+    }
+
+    /// Enrolment is the only place a new template hash is written. Other
+    /// fields carry over from the existing Keychain record if there is one
+    /// (the record is trusted even when the template file isn't); a first
+    /// enrolment uses the current settings, with face unlock off.
+    private func saveIntegrityAfterEnrolment(templateSHA256: String) throws {
+        let record: IntegrityRecord
+        if let old = integrity {
+            record = IntegrityRecord(templateSHA256: templateSHA256, threshold: old.threshold,
+                                     livenessMode: old.effectiveLivenessMode, enabled: old.enabled == true)
+        } else {
+            record = IntegrityRecord(templateSHA256: templateSHA256, threshold: Settings.matchThreshold,
+                                     livenessMode: Settings.livenessMode, enabled: false)
+        }
+        try PasswordVault.saveIntegrity(record)
+        integrity = record
+        integrityLoaded = true
+        Settings.matchThreshold = record.threshold
+        Settings.livenessMode = record.effectiveLivenessMode
+        Settings.isEnabled = record.enabled == true
     }
 
     // MARK: - Menu
@@ -209,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         let enabled = item("Enabled", #selector(toggleEnabled))
-        enabled.state = Settings.isEnabled ? .on : .off
+        enabled.state = isEffectivelyEnabled ? .on : .off
         menu.addItem(enabled)
         menu.addItem(.separator())
 
@@ -302,17 +363,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Asks for the Mac login password and runs `action` only if
     /// OpenDirectory accepts it. Guards every security-relevant change.
-    private func requireLoginPassword(_ reason: String, then action: @escaping @MainActor () -> Void) {
-        // Within a Setup session, a password verified in the last 5 minutes
-        // is reused (only its timestamp is kept).
-        if setupWindow != nil && setupModel.recentlyVerified() {
+    ///
+    /// `allowReuse`: within a Setup session, a password verified in the last
+    /// 5 minutes (and not interrupted by a screen lock or sleep) may stand in
+    /// for a new prompt. Only a timestamp is kept. Enrolment, turning
+    /// liveness off and deleting data always prompt.
+    private func requireLoginPassword(_ reason: String, allowReuse: Bool = false,
+                                      then action: @escaping @MainActor () -> Void) {
+        if allowReuse && setupWindow != nil && setupModel.recentlyVerified() {
             action()
             return
         }
         guard let password = askForPassword(title: "Confirm with your login password", text: reason) else { return }
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let result = PasswordVerifier.verify(password)
-            await MainActor.run {
+        Task { @MainActor [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> PasswordVerifier.Result in
+                let result = PasswordVerifier.verify(password)
+                return result
+            }.value
+            do {
                 guard let self else { return }
                 switch result {
                 case .valid:
@@ -344,9 +412,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func toggleEnabled() {
-        if Settings.isEnabled {
+        if isEffectivelyEnabled || Settings.isEnabled {
             // Turning it off never needs a password.
             Settings.isEnabled = false
+            try? updateIntegrity { $0.enabled = false }
             updateIcon()
             refreshSetup()
             return
@@ -356,11 +425,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert("FaceUnlock can't be enabled yet", problems.joined(separator: "\n"))
             return
         }
-        requireLoginPassword("Enter your Mac login password to turn on face unlock.") { [weak self] in
-            Settings.isEnabled = true
-            self?.applyLaunchAtLoginDefault()
-            self?.updateIcon()
-            self?.refreshSetup()
+        requireLoginPassword("Enter your Mac login password to turn on face unlock.", allowReuse: true) { [weak self] in
+            guard let self else { return }
+            do {
+                try self.updateIntegrity { $0.enabled = true }
+            } catch {
+                self.alert("Couldn't turn on face unlock", String(describing: error))
+                return
+            }
+            self.applyLaunchAtLoginDefault()
+            self.updateIcon()
+            self.refreshSetup()
         }
     }
 
@@ -372,13 +447,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Password-gated, and recorded in the Keychain integrity item.
     private func setLiveness(_ mode: LivenessMode) {
         guard mode != Settings.livenessMode || integrityProblem != nil else { return }
-        requireLoginPassword("Enter your Mac login password to change the liveness check to “\(mode.title)”.") { [weak self] in
+        requireLoginPassword("Enter your Mac login password to change the liveness check to “\(mode.title)”.",
+                             allowReuse: mode != .off) { [weak self] in
             guard let self else { return }
-            Settings.livenessMode = mode
             do {
-                try self.saveIntegrity()
+                try self.updateIntegrity { $0.livenessMode = mode }
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
+                return
             }
             self.setupModel.livenessProposal = nil
             // The test result was for the old mode; a running test uses it too.
@@ -408,13 +484,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Password-gated, and recorded in the Keychain integrity item.
     private func applyThreshold(_ value: Float) {
-        requireLoginPassword(String(format: "Enter your Mac login password to change the match threshold to %.2f.", value)) { [weak self] in
+        requireLoginPassword(String(format: "Enter your Mac login password to change the match threshold to %.2f.", value),
+                             allowReuse: true) { [weak self] in
             guard let self else { return }
-            Settings.matchThreshold = value
             do {
-                try self.saveIntegrity()
+                try self.updateIntegrity { $0.threshold = MatchPolicy(threshold: value).threshold }
             } catch {
                 self.alert("Couldn't save setting", String(describing: error))
+                return
             }
             // A running test uses the old threshold.
             self.stopTest()
@@ -425,14 +502,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Keeps Blink + movement and writes it explicitly into the Keychain record.
     private func keepBlinkLiveness() {
-        Settings.livenessMode = .blinkAndMovement
-        do {
-            try saveIntegrity()
-            setupModel.livenessProposal = nil
-        } catch {
-            alert("Couldn't save setting", String(describing: error))
+        requireLoginPassword("Enter your Mac login password to keep the Blink + movement check.", allowReuse: true) { [weak self] in
+            guard let self else { return }
+            do {
+                try self.updateIntegrity { $0.livenessMode = .blinkAndMovement }
+                self.setupModel.livenessProposal = nil
+            } catch {
+                self.alert("Couldn't save setting", String(describing: error))
+            }
+            self.refreshSetup()
         }
-        refreshSetup()
     }
 
     @objc private func requestCamera() {
@@ -516,13 +595,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             text: "FaceUnlock types this password on the lock screen after recognising you. It is checked now and stored only in your Keychain."
         ) else { return }
 
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let result = PasswordVerifier.verify(password)
-            var saveError: String?
-            if result == .valid {
-                do { try PasswordVault.savePassword(password) } catch { saveError = String(describing: error) }
-            }
-            await MainActor.run {
+        Task { @MainActor [weak self] in
+            let (result, saveError) = await Task.detached(priority: .userInitiated) { () -> (PasswordVerifier.Result, String?) in
+                let result = PasswordVerifier.verify(password)
+                var saveError: String?
+                if result == .valid {
+                    do { try PasswordVault.savePassword(password) } catch { saveError = String(describing: error) }
+                }
+                return (result, saveError)
+            }.value
+            do {
                 guard let self else { return }
                 switch result {
                 case .valid where saveError == nil:
@@ -546,13 +628,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !password.isEmpty, !setupModel.passwordBusy else { return }
         setupModel.passwordBusy = true
         setupModel.passwordError = nil
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let result = PasswordVerifier.verify(password)
-            var saveError: String?
-            if result == .valid {
-                do { try PasswordVault.savePassword(password) } catch { saveError = String(describing: error) }
-            }
-            await MainActor.run {
+        Task { @MainActor [weak self] in
+            let (result, saveError) = await Task.detached(priority: .userInitiated) { () -> (PasswordVerifier.Result, String?) in
+                let result = PasswordVerifier.verify(password)
+                var saveError: String?
+                if result == .valid {
+                    do { try PasswordVault.savePassword(password) } catch { saveError = String(describing: error) }
+                }
+                return (result, saveError)
+            }.value
+            do {
                 guard let self else { return }
                 let model = self.setupModel
                 model.passwordBusy = false
@@ -618,7 +703,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             startTest: { [weak self] in self?.testRecognition() },
             stopTest: { [weak self] in self?.stopTest() },
             setEnabled: { [weak self] on in
-                guard let self, on != Settings.isEnabled else { return }
+                guard let self, on != self.isEffectivelyEnabled else { return }
                 self.toggleEnabled()
             },
             setLaunchAtLogin: { [weak self] on in self?.setLaunchAtLogin(on) },
@@ -702,7 +787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             details[.test] = "Check that it recognises you live: \(how) until it says PASS (threshold \(threshold))."
         }
 
-        let enabled = Settings.isEnabled
+        let enabled = isEffectivelyEnabled
         conditions[.turnOn] = enabled ? .done : .notDone
         details[.turnOn] = enabled
             ? "Face unlock is on."
@@ -850,10 +935,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             let raw = try FaceTemplate(modelID: FaceEmbedder.modelID, samples: embeddings, cameraID: cameraID)
             let cleaned = try raw.removingOutliers(minimumSimilarity: 0.5, minimumKept: 12)
-            templateDigest = try store.save(cleaned)
+            let digest = try store.save(cleaned)
+            templateDigest = digest
             template = cleaned
             coordinator.template = cleaned
-            try saveIntegrity()
+            try saveIntegrityAfterEnrolment(templateSHA256: digest)
             model.instruction = "Enrolled ✓"
             model.detail = String(format: "%d samples kept, consistency %.2f. Now test recognition below.",
                                   cleaned.samples.count, cleaned.consistency)

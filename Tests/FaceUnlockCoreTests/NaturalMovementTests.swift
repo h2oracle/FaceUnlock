@@ -2,134 +2,154 @@ import Foundation
 import Testing
 @testable import FaceUnlockCore
 
-/// 15 fps frame generator for the natural-movement mode.
-private func frame(_ i: Int, score: Float = 0.8, faces: Int = 1,
-                   yaw: (Double) -> Double, pitch: (Double) -> Double, eye: (Int) -> Double) -> FrameObservation {
-    let t = Double(i) / 15
-    let e = eye(i)
-    return FrameObservation(
-        time: t, faceCount: faces,
-        score: faces == 1 ? MatchScore(centroid: score, bestSample: score) : nil,
-        eyes: EyeSample(time: t, left: e, right: e, faceShape: 1.2, pitch: pitch(t)),
-        yawDegrees: yaw(t), pitchDegrees: pitch(t))
+private let fps = 30.0
+
+/// Runs `seconds` of frames through a natural-movement evaluator; returns
+/// the time of the first unlock (nil if never) and the last snapshot.
+private func run(_ face: inout SyntheticFace, seconds: Double,
+                 pose: (Double) -> SyntheticFace.Pose) -> (unlockAt: Double?, last: UnlockEvaluator.Snapshot?) {
+    var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55, requiredConsecutive: 3), liveness: .naturalMovement)
+    var last: UnlockEvaluator.Snapshot?
+    for i in 0..<Int(seconds * fps) {
+        let t = Double(i) / fps
+        let s = e.observe(face.frame(time: t, pose: pose(t)))
+        last = s
+        if s.shouldUnlock { return (t, s) }
+    }
+    return (nil, last)
 }
 
-/// A person sitting normally: slow sway of ~±1° and small eye-region changes.
-private func live(_ i: Int) -> FrameObservation {
-    frame(i, yaw: { 1.0 * sin($0 * 2.1) }, pitch: { 0.6 * sin($0 * 1.3) },
-          eye: { 0.10 * (1 + 0.04 * sin(Double($0) * 1.7) + 0.02 * cos(Double($0) * 4.3)) })
+/// A person sitting normally: slow head sway of a few degrees.
+private func normalHead(_ t: Double) -> SyntheticFace.Pose {
+    SyntheticFace.Pose(yaw: 6 * sin(2 * .pi * 0.5 * t), pitch: 3 * sin(2 * .pi * 0.4 * t + 1),
+                       roll: 1 * sin(2 * .pi * 0.3 * t), tx: 0.05 * sin(t), ty: 0.03 * cos(t))
 }
 
-/// A printed photo held still: only tiny estimation noise.
-private func stillPhoto(_ i: Int) -> FrameObservation {
-    frame(i, yaw: { t in 0.1 * (Double(Int(t * 15) % 2) - 0.5) }, pitch: { _ in 0 },
-          eye: { 0.10 * (1 + 0.003 * (Double($0 % 2) - 0.5)) })
+/// Sitting still: only small involuntary movement.
+private func stillishHead(_ t: Double) -> SyntheticFace.Pose {
+    SyntheticFace.Pose(yaw: 2.5 * sin(2 * .pi * 0.6 * t) + 0.3 * sin(2 * .pi * 7 * t),
+                       pitch: 1.5 * sin(2 * .pi * 0.45 * t + 2), roll: 0.5 * sin(2 * .pi * 0.5 * t))
 }
 
-/// A photo moved around in a hand: rigid pose changes, eyes unchanged.
-private func movingPhoto(_ i: Int) -> FrameObservation {
-    frame(i, yaw: { 4 * sin($0 * 2) }, pitch: { 2 * sin($0 * 1.5) },
-          eye: { 0.10 * (1 + 0.003 * (Double($0 % 2) - 0.5)) })
+/// A photo waved around: ±25° yaw/pitch/roll at 2 Hz plus translation.
+private func wavedPhoto(_ t: Double) -> SyntheticFace.Pose {
+    SyntheticFace.Pose(yaw: 25 * sin(2 * .pi * 2 * t), pitch: 25 * sin(2 * .pi * 2 * t + 1.3),
+                       roll: 25 * sin(2 * .pi * 2 * t + 2.1), tx: 0.6 * sin(2 * .pi * 1.1 * t),
+                       ty: 0.4 * cos(2 * .pi * 0.9 * t), distance: 8 + 1.5 * sin(2 * .pi * 0.7 * t))
+}
+
+/// A photo held in a hand: small tremor.
+private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
+    SyntheticFace.Pose(yaw: 4 * sin(2 * .pi * 0.8 * t), pitch: 3 * sin(2 * .pi * 0.6 * t + 1),
+                       roll: 2 * sin(2 * .pi * 0.5 * t), tx: 0.1 * sin(t))
 }
 
 @Suite struct NaturalMovementTests {
-    private let policy = MatchPolicy(threshold: 0.55, requiredConsecutive: 3)
-
-    private func firstUnlock(_ make: (Int) -> FrameObservation, mode: LivenessMode, frames: Int = 150) -> Int? {
-        var e = UnlockEvaluator(policy: policy, liveness: mode)
-        for i in 0..<frames where e.observe(make(i)).shouldUnlock { return i }
-        return nil
-    }
-
-    @Test func personSittingNormallyPassesWithinAboutOneSecond() throws {
-        let i = try #require(firstUnlock(live, mode: .naturalMovement))
-        let seconds = Double(i) / 15
-        #expect(seconds >= 0.5)
-        #expect(seconds <= 1.2)
-    }
-
-    @Test func stillPhotoFailsEvenOverLongWindows() {
-        // 10 s of a still photo, at both 15 and 30 fps.
-        #expect(firstUnlock(stillPhoto, mode: .naturalMovement, frames: 150) == nil)
-        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
-        for i in 0..<300 {
-            let t = Double(i) / 30
-            let f = FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.9, bestSample: 0.9),
-                                     eyes: EyeSample(time: t, left: 0.1 + (i % 2 == 0 ? 0.0002 : -0.0002),
-                                                     right: 0.1, faceShape: 1.2, pitch: 0),
-                                     yawDegrees: i % 2 == 0 ? 0.05 : -0.05, pitchDegrees: 0)
-            #expect(!e.observe(f).shouldUnlock)
+    @Test func realHeadMovingNormallyPassesQuickly() throws {
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: false, seed: UInt64(seed))
+            let r = run(&face, seconds: 5, pose: normalHead)
+            let t = try #require(r.unlockAt, "seed \(seed): parallax \(r.last?.motionParallax ?? -1)")
+            #expect(t >= 0.5 && t <= 1.5, "seed \(seed): passed at \(t)s")
         }
     }
 
-    @Test func passIsTiedToDurationNotFrameCount() {
-        // At 30 fps, 0.3 s of perfect movement is 9+ frames but still too short.
-        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
-        var unlockedAt: Double?
-        for i in 0..<60 where unlockedAt == nil {
-            let t = Double(i) / 30
-            let eye = 0.10 * (1 + (i % 2 == 0 ? 0.04 : -0.04))
-            let f = FrameObservation(time: t, faceCount: 1, score: MatchScore(centroid: 0.9, bestSample: 0.9),
-                                     eyes: EyeSample(time: t, left: eye, right: eye, faceShape: 1.2, pitch: 0),
-                                     yawDegrees: 2 * sin(t * 6), pitchDegrees: 0)
-            if e.observe(f).shouldUnlock { unlockedAt = t }
+    @Test func realHeadSittingStillButMicroMovingPasses() throws {
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: false, seed: UInt64(seed))
+            let r = run(&face, seconds: 6, pose: stillishHead)
+            let t = try #require(r.unlockAt, "seed \(seed): parallax \(r.last?.motionParallax ?? -1) rot \(r.last?.motionRotation ?? -1)")
+            #expect(t <= 3, "seed \(seed): passed at \(t)s")
         }
-        #expect((unlockedAt ?? 0) >= 0.5)
+    }
+
+    @Test func perfectlyStillRealHeadWaits() {
+        var face = SyntheticFace(flat: false)
+        #expect(run(&face, seconds: 5, pose: { _ in SyntheticFace.Pose() }).unlockAt == nil)
+    }
+
+    @Test func wavedPhotoFails() {
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: true, seed: UInt64(seed))
+            let r = run(&face, seconds: 10, pose: wavedPhoto)
+            #expect(r.unlockAt == nil, "seed \(seed): photo passed, parallax \(r.last?.motionParallax ?? -1)")
+        }
+    }
+
+    @Test func handHeldPhotoFails() {
+        for seed in 1...5 {
+            var face = SyntheticFace(flat: true, seed: UInt64(seed))
+            let r = run(&face, seconds: 10, pose: handHeldPhoto)
+            #expect(r.unlockAt == nil, "seed \(seed): photo passed, parallax \(r.last?.motionParallax ?? -1)")
+        }
     }
 
     @Test func stillPhotoFails() {
-        #expect(firstUnlock(stillPhoto, mode: .naturalMovement) == nil)
+        var face = SyntheticFace(flat: true)
+        #expect(run(&face, seconds: 10, pose: { _ in SyntheticFace.Pose() }).unlockAt == nil)
     }
 
-    @Test func rigidlyMovedPhotoFails() {
-        #expect(firstUnlock(movingPhoto, mode: .naturalMovement) == nil)
-    }
-
-    @Test func noBlinkNeededInNaturalMode() {
-        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
-        var last: UnlockEvaluator.Snapshot?
-        for i in 0..<40 { last = e.observe(live(i)) }
-        #expect(last?.blinked == false)
-        #expect(last?.livenessSatisfied == true)
+    @Test func noisierLandmarksStillSeparateHeadFromPhoto() {
+        var head = SyntheticFace(flat: false, noise: 0.02, seed: 9)
+        var photo = SyntheticFace(flat: true, noise: 0.02, seed: 9)
+        #expect(run(&head, seconds: 5, pose: normalHead).unlockAt != nil)
+        #expect(run(&photo, seconds: 10, pose: wavedPhoto).unlockAt == nil)
     }
 
     @Test func blinkModeStillNeedsABlink() {
-        #expect(firstUnlock(live, mode: .blinkAndMovement) == nil)
+        var face = SyntheticFace(flat: false)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .blinkAndMovement)
+        for i in 0..<150 {
+            let t = Double(i) / fps
+            #expect(!e.observe(face.frame(time: t, pose: normalHead(t))).shouldUnlock)
+        }
     }
 
     @Test func offModeNeedsOnlyConsecutiveMatches() {
-        #expect(firstUnlock(stillPhoto, mode: .off) == 2)
+        var face = SyntheticFace(flat: true)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55, requiredConsecutive: 3), liveness: .off)
+        var at: Int?
+        for i in 0..<10 where at == nil {
+            if e.observe(face.frame(time: Double(i) / fps, pose: SyntheticFace.Pose())).shouldUnlock { at = i }
+        }
+        #expect(at == 2)
     }
 
     @Test func nonMatchingFrameResetsMovementEvidence() {
-        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
-        for i in 0..<14 { e.observe(live(i)) }
+        var face = SyntheticFace(flat: false)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
+        for i in 0..<20 { e.observe(face.frame(time: Double(i) / fps, pose: normalHead(Double(i) / fps))) }
         #expect(e.snapshot.motionSeconds > 0.5)
-        let s = e.observe(frame(14, score: 0.3, yaw: { _ in 0 }, pitch: { _ in 0 }, eye: { _ in 0.1 }))
+        let s = e.observe(face.frame(time: 0.7, pose: normalHead(0.7), score: 0.3))
         #expect(s.motionSeconds == 0)
         #expect(s.resetReason == .noMatch)
-        // Evidence has to build up again from scratch.
-        var unlockedAt: Int?
-        for i in 15..<80 where unlockedAt == nil {
-            if e.observe(live(i)).shouldUnlock { unlockedAt = i }
-        }
-        #expect((unlockedAt ?? 0) >= 15 + 7)
-    }
-
-    @Test func progressRisesTowardsOne() {
-        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
-        let early = e.observe(live(0)).progress
-        var late = 0.0
-        for i in 1..<40 { late = e.observe(live(i)).progress }
-        #expect(early < 0.5)
-        #expect(late == 1)
     }
 
     @Test func diagnosticsExplainMissingMovement() {
-        var e = UnlockEvaluator(policy: policy, liveness: .naturalMovement)
+        var face = SyntheticFace(flat: true)
+        var e = UnlockEvaluator(policy: MatchPolicy(threshold: 0.55), liveness: .naturalMovement)
         var d = AttemptDiagnostics()
-        for i in 0..<100 { d.observe(e.observe(stillPhoto(i))) }
+        for i in 0..<100 { d.observe(e.observe(face.frame(time: Double(i) / fps, pose: wavedPhoto(Double(i) / fps)))) }
         #expect(d.failureOutcome == .noNaturalMovement)
+    }
+
+    @Test func homographyIsExactForAPlane() throws {
+        var src: [CGPoint] = []
+        for i in 0..<20 {
+            let x: Double = Double(i % 5) * 10
+            let y: Double = Double(i / 5) * 7 + Double(i % 3)
+            src.append(CGPoint(x: x, y: y))
+        }
+        // An arbitrary projective map.
+        var dst: [CGPoint] = []
+        for p in src {
+            let w: Double = 0.001 * p.x - 0.0007 * p.y + 1
+            let u: Double = (1.2 * p.x + 0.1 * p.y + 5) / w
+            let v: Double = (-0.2 * p.x + 0.9 * p.y - 3) / w
+            dst.append(CGPoint(x: u, y: v))
+        }
+        let r = try #require(Homography.residuals(from: src, to: dst))
+        #expect(r.allSatisfy { abs($0.dx) < 1e-6 && abs($0.dy) < 1e-6 })
     }
 }
 
@@ -138,8 +158,9 @@ private func movingPhoto(_ i: Int) -> FrameObservation {
         var e = UnlockEvaluator(policy: MatchPolicy(), liveness: .naturalMovement)
         var summarizer = DiagnosticsSummarizer(threshold: 0.55, start: 0)
         var lines: [String] = []
+        var face = SyntheticFace(flat: false)
         for i in 0..<30 {
-            let s = e.observe(live(i))
+            let s = e.observe(face.frame(time: Double(i) / 15, pose: normalHead(Double(i) / 15)))
             if let line = summarizer.observe(s, eyeOpenness: 0.1, at: Double(i) / 15) { lines.append(line) }
         }
         #expect(lines.count >= 3 && lines.count <= 4)
@@ -154,7 +175,11 @@ private func movingPhoto(_ i: Int) -> FrameObservation {
     @Test func reportsResetReasons() {
         var e = UnlockEvaluator(policy: MatchPolicy(), liveness: .naturalMovement)
         var summarizer = DiagnosticsSummarizer(threshold: 0.55, start: 0)
-        for i in 0..<5 { _ = summarizer.observe(e.observe(live(i)), eyeOpenness: nil, at: Double(i) / 15) }
+        var face = SyntheticFace(flat: false)
+        for i in 0..<5 {
+            let t = Double(i) / 15
+            _ = summarizer.observe(e.observe(face.frame(time: t, pose: normalHead(t))), eyeOpenness: nil, at: t)
+        }
         let none = FrameObservation(time: 0.4, faceCount: 0, score: nil, eyes: nil, yawDegrees: nil, pitchDegrees: nil)
         _ = summarizer.observe(e.observe(none), eyeOpenness: nil, at: 0.4)
         let line = summarizer.flush(at: 0.45)

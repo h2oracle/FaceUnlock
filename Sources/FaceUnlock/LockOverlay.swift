@@ -39,8 +39,9 @@ final class LockOverlay {
     }
 
     /// A failed look while scanning continues: shake, caption, back to scanning.
-    func flashFailure() {
+    func flashFailure(_ message: String = "Face Not Recognised") {
         cancelPending()
+        model.failureText = message
         model.visible = true
         model.phase = .failure
         present()
@@ -52,6 +53,7 @@ final class LockOverlay {
 
     func flashFailureAndHide() {
         cancelPending()
+        model.failureText = "Face Not Recognised"
         model.visible = true
         model.phase = .failure
         present()
@@ -148,6 +150,7 @@ private final class HUDModel {
     enum Phase { case scanning, success, failure, stopped }
     var phase: Phase = .scanning
     var visible = false
+    var failureText = "Face Not Recognised"
 }
 
 /// Frosted HUD background (.hudWindow material, dark, rounded corners).
@@ -252,7 +255,7 @@ private struct HUDView: View {
         switch model.phase {
         case .scanning: return "Looking for you…"
         case .success: return ""
-        case .failure: return "Face Not Recognised"
+        case .failure: return model.failureText
         case .stopped: return "Face Not Recognised\nUse your password"
         }
     }

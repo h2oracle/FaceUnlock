@@ -76,6 +76,9 @@ final class UnlockCoordinator {
     private var displaySleeping = false
     private var displaySleptDuringLock = false
     private var isTyping = false
+    /// The password was typed in full but the unlock hasn't been confirmed
+    /// yet. Survives sleep/cancel so a stale password is never retyped.
+    private var awaitingUnlockConfirmation = false
     private var typingCancellation: TypingCancellation?
     private var lastIdle: TimeInterval = .infinity
     private var notReadyUntil: TimeInterval = 0
@@ -170,6 +173,7 @@ final class UnlockCoordinator {
         inLockSession = true
         lockStartedAt = now
         lockout.startNewLockSession()
+        awaitingUnlockConfirmation = false
         gate = ScanGate(mode: startMode())
         displaySleptDuringLock = false
         recordedNotReadyThisSession = false
@@ -189,10 +193,11 @@ final class UnlockCoordinator {
         stopFastTimer()
         let t = now
         diag(String(format: "lock session ended: screen unlocked after %.1fs", t - lockStartedAt))
-        if isTyping {
+        if isTyping || awaitingUnlockConfirmation {
             // Screen unlocked while (or just after) we typed: it worked.
             logTiming(unlockedAt: t)
             record(.unlocked)
+            awaitingUnlockConfirmation = false
         } else if let processor {
             processor.flushDiagnostics()
             if processor.sawFace {
@@ -225,6 +230,17 @@ final class UnlockCoordinator {
         overlay.hide()
     }
 
+    /// Typed password, still locked, and the confirmation was interrupted:
+    /// treat it as rejected so it's never typed again in this lock session.
+    private func resolveUnconfirmedTyping() {
+        guard awaitingUnlockConfirmation, inLockSession, SessionState.current().screenLocked else { return }
+        awaitingUnlockConfirmation = false
+        lockout.recordPasswordRejected()
+        status = "Typed password did not unlock. Check the stored password."
+        record(.passwordRejected)
+        log.error("Typed password was not confirmed before sleep; stopping for this lock session")
+    }
+
     private func handleWake() {
         let wasSleeping = displaySleeping
         displaySleeping = false
@@ -238,6 +254,7 @@ final class UnlockCoordinator {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refresh()
+                self.resolveUnconfirmedTyping()
                 self.trigger(.displayWake)
             }
         }
@@ -322,7 +339,7 @@ final class UnlockCoordinator {
     }
 
     private func trigger(_ trigger: ScanTrigger) {
-        guard inLockSession, processor == nil, !isTyping else { return }
+        guard inLockSession, processor == nil, !isTyping, !awaitingUnlockConfirmation else { return }
         guard !displaySleeping else { blocked("display asleep"); return }
         guard !lockout.isLockedOut else {
             blocked("stopped until manual unlock", detail: "failures=\(lockout.totalFailures) passwordRejected=\(lockout.passwordRejected)")
@@ -395,7 +412,8 @@ final class UnlockCoordinator {
             onReadout: { [weak self] readout in
                 let faces = readout.snapshot.faceCount
                 let matched = readout.snapshot.frameMatched
-                Task { @MainActor in self?.frameObserved(id: id, faceCount: faces, matched: matched) }
+                let live = readout.snapshot.livenessSatisfied
+                Task { @MainActor in self?.frameObserved(id: id, faceCount: faces, matched: matched, live: live) }
             },
             onDiagnostics: { line in Diagnostics.write("  \(line)") }
         ) { [weak self] in
@@ -429,6 +447,12 @@ final class UnlockCoordinator {
         scanDeadline = nil
         processor?.finish()
         processor = nil
+        // An unrecognised appearance still open when the camera stops counts too.
+        if let event = monitor?.finish() {
+            monitor = nil
+            lockout.recordFailure()
+            diag("failed look (\(event.rawValue)) at scan end; lock-session total \(lockout.totalFailures)/\(lockout.maximumTotalFailures)")
+        }
         monitor = nil
         camera.stop()
         isAttempting = false
@@ -444,20 +468,35 @@ final class UnlockCoordinator {
         if sawFace { record(outcome) }
     }
 
-    private func frameObserved(id: Int, faceCount: Int, matched: Bool) {
+    private func frameObserved(id: Int, faceCount: Int, matched: Bool, live: Bool) {
         guard id == scanID, processor != nil, var monitor else { return }
         let t = now
         if timing?.firstFrame == nil { timing?.firstFrame = t }
         if faceCount > 0, timing?.firstFace == nil { timing?.firstFace = t }
-        let event = monitor.observe(time: t, faceCount: faceCount, matched: matched)
+        let event = monitor.observe(time: t, faceCount: faceCount, matched: matched, live: live)
         self.monitor = monitor
+        if faceCount > 0 {
+            lockout.recordFaceTime(monitor.lastFrameDuration)
+            if lockout.faceTimeExhausted {
+                diag("scan ended: face-time limit for this lock session reached (\(Int(lockout.maximumFaceSeconds))s)")
+                endScanRecordingOutcome()
+                overlay.showStopped()
+                status = "Stopped (time limit). Unlock manually."
+                return
+            }
+        }
         overlay.setVisible(monitor.hudVisible(at: t))
-        guard event == .failedLook else { return }
+        guard let event else { return }
+        failedLook(event)
+    }
 
+    /// Counts a failed look and stops scanning when the limits are reached.
+    private func failedLook(_ event: ScanMonitor.Event) {
         lockout.recordFailure()
-        diag("failed look \(lockout.failures)/\(lockout.maximumFailures) (lock-session total \(lockout.totalFailures)/\(lockout.maximumTotalFailures))")
+        diag("failed look (\(event.rawValue)) \(lockout.failures)/\(lockout.maximumFailures) (lock-session total \(lockout.totalFailures)/\(lockout.maximumTotalFailures))")
+        guard processor != nil else { return }
         if lockout.canScan {
-            overlay.flashFailure()
+            overlay.flashFailure(event == .notLive ? "Couldn't Verify\nLive Face" : "Face Not Recognised")
             status = "Not recognised (\(lockout.remainingBeforePause) look(s) left)"
         } else {
             diag("scan ended: too many failed looks")
@@ -515,25 +554,28 @@ final class UnlockCoordinator {
         // The tick animation runs in parallel; typing doesn't wait for it.
         overlay.showSuccess()
         let wakeFirst = SessionState.displayAsleep
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let failure: AttemptOutcome?
-            do {
-                let secret = try PasswordVault.readPassword()
-                defer { secret.wipe() }
-                if wakeFirst {
-                    KeyTyper.wakeDisplay()
-                    usleep(100_000)
+        Task { @MainActor [weak self] in
+            let failure = await Task.detached(priority: .userInitiated) { () -> AttemptOutcome? in
+                let failure: AttemptOutcome?
+                do {
+                    let secret = try PasswordVault.readPassword()
+                    defer { secret.wipe() }
+                    if wakeFirst {
+                        KeyTyper.wakeDisplay()
+                        usleep(100_000)
+                    }
+                    try KeyTyper.typeAndSubmit(secret, cancellation: cancellation)
+                    failure = nil
+                } catch let error as PasswordVault.VaultError {
+                    failure = .keychainError(error.description)
+                } catch KeyTyper.TypingError.frontWindow(.otherOwner(let owner)) {
+                    failure = .frontWindowRefused(owner: owner)
+                } catch {
+                    failure = .typingStopped(String(describing: error))
                 }
-                try KeyTyper.typeAndSubmit(secret, cancellation: cancellation)
-                failure = nil
-            } catch let error as PasswordVault.VaultError {
-                failure = .keychainError(error.description)
-            } catch KeyTyper.TypingError.frontWindow(.otherOwner(let owner)) {
-                failure = .frontWindowRefused(owner: owner)
-            } catch {
-                failure = .typingStopped(String(describing: error))
-            }
-            await MainActor.run { self?.typingFinished(id: id, failure: failure) }
+                return failure
+            }.value
+            self?.typingFinished(id: id, failure: failure)
         }
     }
 
@@ -552,18 +594,14 @@ final class UnlockCoordinator {
             return
         }
         diag("typing done")
+        awaitingUnlockConfirmation = true
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.unlockConfirmTimeout) { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, id == self.scanID, self.isTyping else { return }
+                guard let self, id == self.scanID, self.awaitingUnlockConfirmation else { return }
                 self.isTyping = false
                 self.typingCancellation = nil
-                if SessionState.current().screenLocked && self.inLockSession {
-                    self.lockout.recordPasswordRejected()
-                    self.status = "Typed password did not unlock. Check the stored password."
-                    self.record(.passwordRejected)
-                    self.overlay.hide()
-                    log.error("Typed password did not unlock the screen; stopping for this lock session")
-                }
+                self.overlay.hide()
+                self.resolveUnconfirmedTyping()
             }
         }
     }

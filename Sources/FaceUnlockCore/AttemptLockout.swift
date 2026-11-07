@@ -8,13 +8,19 @@ import Foundation
 ///   gone to sleep and woken again (`displayWoke()`); input doesn't resume it.
 /// - After `maximumTotalFailures` failures in the whole lock session, or one
 ///   typed password that didn't unlock, nothing more is tried until the user
-///   unlocks manually (`startNewLockSession()`).
+///   unlocks manually (`startNewLockSession()`). The same applies once a
+///   face has been in front of the camera for `maximumFaceSeconds` in total
+///   during the lock session, so trying over and over can't go on forever.
 public struct AttemptLockout: Equatable, Sendable {
     public static let defaultMaximumFailures = 3
     public static let defaultMaximumTotalFailures = 5
+    public static let defaultMaximumFaceSeconds: TimeInterval = 120
 
     public let maximumFailures: Int
     public let maximumTotalFailures: Int
+    public let maximumFaceSeconds: TimeInterval
+    /// Seconds a face was in view during this lock session.
+    public private(set) var faceSeconds: TimeInterval = 0
     /// Failures since the last display wake.
     public private(set) var failures = 0
     /// Failures in this lock session.
@@ -24,13 +30,24 @@ public struct AttemptLockout: Equatable, Sendable {
     public private(set) var passwordRejected = false
 
     public init(maximumFailures: Int = AttemptLockout.defaultMaximumFailures,
-                maximumTotalFailures: Int = AttemptLockout.defaultMaximumTotalFailures) {
+                maximumTotalFailures: Int = AttemptLockout.defaultMaximumTotalFailures,
+                maximumFaceSeconds: TimeInterval = AttemptLockout.defaultMaximumFaceSeconds) {
         self.maximumFailures = max(1, maximumFailures)
         self.maximumTotalFailures = max(self.maximumFailures, maximumTotalFailures)
+        self.maximumFaceSeconds = max(1, maximumFaceSeconds)
+    }
+
+    public var faceTimeExhausted: Bool { faceSeconds >= maximumFaceSeconds }
+
+    public mutating func recordFaceTime(_ seconds: TimeInterval) {
+        guard seconds > 0, seconds.isFinite else { return }
+        faceSeconds += seconds
     }
 
     /// Stopped until the user unlocks manually.
-    public var isLockedOut: Bool { passwordRejected || totalFailures >= maximumTotalFailures }
+    public var isLockedOut: Bool {
+        passwordRejected || totalFailures >= maximumTotalFailures || faceTimeExhausted
+    }
     /// Stopped until the display sleeps and wakes.
     public var needsDisplayWake: Bool { failures >= maximumFailures }
     public var canScan: Bool { !isLockedOut && !needsDisplayWake }
@@ -53,6 +70,7 @@ public struct AttemptLockout: Equatable, Sendable {
     public mutating func startNewLockSession() {
         failures = 0
         totalFailures = 0
+        faceSeconds = 0
         passwordRejected = false
     }
 }

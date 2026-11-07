@@ -25,7 +25,8 @@ live person, it types your login password into the lock screen for you.
 > - In the default mode the **camera is on whenever the lock screen is
 >   showing** and the display is awake.
 > - Someone using your unlocked session can't re-enrol a different face,
->   change the settings or turn it on without your login password. They
+>   change the settings or turn it on without your login password, and
+>   editing its files or preferences behind its back disables it. They
 >   *can* turn face unlock off.
 
 ## Features
@@ -95,11 +96,13 @@ cp -R build/FaceUnlock.app ~/Applications/
 open ~/Applications/FaceUnlock.app
 ```
 
-`build.sh` signs the app with `$FACEUNLOCK_SIGN_ID` if set. Otherwise it uses
-your first *Developer ID Application* or *Apple Development* identity, and
-falls back to ad-hoc signing. With a stable identity, macOS keeps the Camera
-and Accessibility permissions and the Keychain access when you rebuild. With
-ad-hoc signing you have to grant them again after every build. The bundle
+`build.sh` signs **ad-hoc** by default. To use your own signing identity,
+copy `signing.local.env.example` to `signing.local.env` (git-ignored) and set
+`FACEUNLOCK_SIGN_ID` to a hash from `security find-identity -v -p codesigning`.
+You can also export `FACEUNLOCK_SIGN_ID` in your shell. With a stable
+identity, macOS keeps the Camera and Accessibility permissions and the
+Keychain access when you rebuild. With ad-hoc signing you have to grant them
+again after every build. The bundle
 identifier (`uk.co.sid.faceunlock`) is just the project's default. Changing it
 gives you a separate app with its own settings and permissions.
 
@@ -125,7 +128,10 @@ Spotlight or Finder. Each step unlocks once the earlier ones are done:
    and what to do if it didn't work.
 
 Within one Setup session, a password you've just confirmed is reused for 5
-minutes so you aren't asked repeatedly. Only the time of confirmation is kept.
+minutes, so you aren't asked again when you turn face unlock on or change the
+strictness. Only the time of confirmation is kept. The reuse ends when the
+screen locks or the Mac sleeps. Enrolling, turning liveness off and deleting
+data always ask again.
 
 ## Settings
 
@@ -133,10 +139,15 @@ All settings are in the menu-bar menu. The first two are also in the Setup
 window.
 
 - **Liveness** (asks for your password):
-  - *Natural movement* (default): no blink needed. Over at least 0.5 s of
-    matching frames your head must move slightly and the eye region must
-    show small natural changes. It is designed to reject a still photo; a
-    moving photo or a video may pass.
+  - *Natural movement* (default): no blink needed. While you're recognised,
+    your head must turn a few degrees (≥ 3° between the ends of the
+    movement), and the landmarks must shift the way only a 3D face does
+    (parallax). A picture on a flat surface moves like a single plane
+    however it's tilted or waved, so photos on paper or a phone fail. A still
+    real head waits until you move slightly; with normal movement it passes
+    in about 0.5–1.5 s. A video of you, a 3D mask or a curved print may
+    still pass. The thresholds were tuned on simulated faces with realistic
+    landmark noise, not on a large real-world dataset.
   - *Blink + movement*: a natural blink plus slight head movement. This is the
     strongest webcam check, but a video of you can still pass.
   - *Off*: face match only. A photo of you can unlock. Not recommended.
@@ -152,25 +163,39 @@ window.
   - *Only after I move the mouse or press a key*: each input starts a scan of
     up to 10 s.
 
-**Limits:** a *failed look* is one face in view that keeps not matching for
-about 2 s. Frames with no face never count. After 3 failed looks, scanning
-stops until the display sleeps and wakes again. After 5 in one lock session,
-or if a typed password didn't unlock the Mac, it stops until you unlock
-manually.
+**Limits:** each of these counts as a *failed look*:
+
+- a face that doesn't match for 2 s in total. Covering the camera or adding
+  a second face doesn't reset the count;
+- a brief appearance (6+ frames) of a face that never matched;
+- a face that matches but doesn't pass the liveness check for 3 s, such as
+  a photo of you.
+
+Frames with no face never count. After 3 failed looks, scanning stops until
+the display sleeps and wakes again. It stops until you unlock manually after
+5 failed looks in one lock session, after a face has been in view for 2
+minutes in total, or if a typed password didn't unlock the Mac. If the Mac
+sleeps before that is confirmed, it is treated as not unlocked.
 
 ## Security model and limitations
 
 See the warning at the top and [SECURITY.md](SECURITY.md) for the threat
 model. In short:
 
-- It resists another person's face and a still photo. It does **not** reliably
-  resist a video, a mask or a skilled attacker with physical access.
+- It resists another person's face and flat photos (still or moved). It
+  does **not** reliably resist a video, a mask or a skilled attacker with
+  physical access.
 - Matching is strict by default, and every typed key is preceded by a check
   that your own session's lock screen is in front.
-- A SHA-256 of the face template, together with the threshold and liveness
-  setting, is kept in the Keychain. If any of them is changed behind
-  FaceUnlock's back, it refuses to unlock and asks you to re-enrol or choose
-  the setting again.
+- The Keychain keeps an integrity record: a SHA-256 of the face template,
+  plus the threshold, the liveness setting and whether face unlock is on.
+  Only enrolment writes a new template hash. Setting changes start from the
+  verified record, never from the files or preferences. If the template or
+  a setting is changed behind FaceUnlock's back, it refuses to unlock and
+  asks you to re-enrol or choose the setting again. If the "enabled"
+  preference doesn't match the record, it stays off. Other apps running as
+  you can't read, change or delete these Keychain items without a macOS
+  prompt asking you to allow it.
 - The password is decoded into memory the app controls and overwritten after
   typing. Copies inside macOS (Keychain, event system, password field) are
   outside its control.

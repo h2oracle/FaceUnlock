@@ -6,7 +6,13 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-26 has the toolchain closest to the one the app is developed
+        # with; macos-15 checks the oldest supported build environment.
+        os: [macos-26, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
