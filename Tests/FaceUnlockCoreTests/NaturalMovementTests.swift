@@ -275,15 +275,15 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
         }
     }
 
-    @Test func absoluteZeroBaselineWasTheBug() {
-        // What 111cadd did: attention measured from pitch 0. With a large
-        // camera offset (−30°) that never passes.
+    @Test func steepCameraAngleUnlocksWhateverThePitchBaseline() {
+        // 111cadd measured attention from pitch 0, so a large camera offset
+        // (−30°) never passed. Tilt is now ignored entirely: only yaw counts.
         let steep: (Double) -> SyntheticFace.Pose = { t in
             var p = normalHead(t)
             p.pitch -= 30
             return p
         }
-        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: 0), pose: steep) == nil)
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: 0), pose: steep) != nil)
         #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -25), pose: steep) != nil)
     }
 
@@ -302,13 +302,14 @@ private func handHeldPhoto(_ t: Double) -> SyntheticFace.Pose {
             return p
         }
         #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: turned) == nil)
-        // Looking far down (−25° more than the baseline) doesn't count either.
+        // Tilting further down (−25° more than the baseline) is ignored: it
+        // still unlocks while the head isn't turned away.
         let down: (Double) -> SyntheticFace.Pose = { t in
             var p = self.lookingAtScreen(t)
             p.pitch -= 25
             return p
         }
-        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: down) == nil)
+        #expect(runAttention(baseline: PoseBaseline(yaw: 0, pitch: -20), seconds: 10, pose: down) != nil)
     }
 
     @Test func handOnChinCannotPoisonTheSessionBaseline() throws {

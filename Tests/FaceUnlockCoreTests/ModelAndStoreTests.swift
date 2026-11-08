@@ -91,7 +91,7 @@ import Testing
         return f
     }
 
-    @Test func rejectsBadFramesAndWalksThroughSteps() {
+    @Test func rejectsBadFramesAndWalksThroughSteps() throws {
         var c = EnrolmentCollector()
         var t = 0.0
         let settling = c.offer(good(), at: t) // settle period starts
@@ -114,6 +114,11 @@ import Testing
         #expect(c.isComplete)
         #expect(c.embeddings.count == c.totalRequired)
         #expect(steps.count == EnrolmentCollector.steps.count)
+        // Step 0 is the baseline step; the bigger tilts follow "slightly down".
+        let names = EnrolmentCollector.steps.map(\.instruction)
+        #expect(names.first == "Look straight at the screen")
+        let down = try #require(names.firstIndex(of: "Look slightly down"))
+        #expect(Array(names[(down + 1)...].prefix(2)) == ["Tilt your head down", "Tilt your head up"])
     }
 }
 

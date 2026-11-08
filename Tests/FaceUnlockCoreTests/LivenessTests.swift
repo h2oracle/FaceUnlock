@@ -207,6 +207,36 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         #expect(last?.consecutiveMatches == 0)
     }
 
+    @Test func tiltedMatchCountsButTiltedNonMatchIsIgnored() {
+        // The gate rejects a strongly tilted face…
+        var analysis = FrameAnalysis(faceCount: 1)
+        analysis.yawDegrees = 0
+        analysis.pitchDegrees = -30
+        analysis.captureQuality = 0.6
+        analysis.boundingBox = CGRect(x: 0.35, y: 0.3, width: 0.25, height: 0.35)
+        analysis.embedding = [1, 0]
+        #expect(FrameQualityGate.problem(analysis) == "tilted")
+        let usable = FrameQualityGate.isUsable(analysis)
+        func tilted(_ i: Int, score: Float) -> FrameObservation {
+            var f = frame(i, score: score, eye: eye(i))
+            f.pitchDegrees = -30
+            f.eyes?.pitch = -30
+            f.usable = usable
+            f.unusableReason = "tilted"
+            return f
+        }
+        // …but a tilted face that matches still advances the evaluator.
+        var e = UnlockEvaluator(policy: policy)
+        var s = e.observe(tilted(0, score: 0.8))
+        #expect(s.frameMatched && s.frameUsable && s.consecutiveMatches == 1)
+        for i in 1..<12 { s = e.observe(tilted(i, score: 0.8)) }
+        #expect(s.blinked && s.consecutiveMatches == 12)
+        // A tilted face that doesn't match is a gap, not a reset.
+        s = e.observe(tilted(12, score: 0.3))
+        #expect(!s.frameMatched && !s.frameUsable)
+        #expect(s.resetReason == nil && s.blinked)
+    }
+
     @Test func blinkDuringNonMatchingFramesDoesNotCount() {
         // Owner's face matches with open eyes, but the closed-eye frames
         // don't match (e.g. someone else's eyes): never unlocks.
@@ -235,13 +265,28 @@ private func run(_ samples: [EyeSample]) -> BlinkDetector {
         let eyes = EyeSample(time: 0, left: 0.15, right: 0.15, faceShape: 1.2)
         #expect(a.problem(score: good, threshold: 0.55, yaw: 3, pitch: -4, eyes: eyes, eyeRatios: (1, 1)) == nil)
         #expect(a.problem(score: good, threshold: 0.55, yaw: 25, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
-        #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 20, eyes: eyes, eyeRatios: (1, 1)) != nil)
-        #expect(a.problem(score: good, threshold: 0.55, yaw: nil, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) != nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: nil, pitch: 0, eyes: eyes, eyeRatios: (1, 1)) == "pose unknown")
         #expect(a.problem(score: MatchScore(centroid: 0.58, bestSample: 0.9), threshold: 0.55, yaw: 0, pitch: 0,
                           eyes: eyes, eyeRatios: (1, 1)) == "weak match")
         let closed = EyeSample(time: 0, left: 0.03, right: 0.03, faceShape: 1.2)
         #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 0, eyes: closed, eyeRatios: (1, 1)) == "eyes closed")
         #expect(a.problem(score: good, threshold: 0.55, yaw: 0, pitch: 0, eyes: eyes, eyeRatios: (0.4, 1)) == "eyes closed")
+    }
+
+    @Test func attentionIgnoresHeadTiltButNotTurningAway() {
+        let a = AttentionPolicy(baseline: PoseBaseline(yaw: 0, pitch: -5))
+        let good = MatchScore(centroid: 0.8, bestSample: 0.8)
+        let eyes = EyeSample(time: 0, left: 0.15, right: 0.15, faceShape: 1.2)
+        // 30° of tilt away from the baseline, either way, is fine.
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 2, pitch: -35, eyes: eyes, eyeRatios: (1, 1)) == nil)
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 2, pitch: 25, eyes: eyes, eyeRatios: (1, 1)) == nil)
+        // A missing pitch alone isn't "pose unknown".
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 2, pitch: nil, eyes: eyes, eyeRatios: (1, 1)) == nil)
+        // Turned beyond 18° still blocks, tilted or not.
+        #expect(a.problem(score: good, threshold: 0.55, yaw: 19, pitch: -5, eyes: eyes, eyeRatios: (1, 1))
+                == "not facing the screen")
+        #expect(a.problem(score: good, threshold: 0.55, yaw: -25, pitch: -35, eyes: eyes, eyeRatios: (1, 1))
+                == "not facing the screen")
     }
 
     @Test func photoOfOwnerNeverUnlocks() {

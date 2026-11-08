@@ -67,12 +67,14 @@ live person, it types your login password into the lock screen for you.
 5. **Attention**: like Face ID's "Require Attention", the last 5 matched
    frames before unlocking must all show you facing the screen, with both
    eyes open and a score at least 0.05 above the threshold. "Facing the
-   screen" means within 18° of how you faced it while enrolling, because
-   the camera sits above the screen and looking at the screen isn't
-   straight at the camera. Faces enrolled before this was recorded use a
-   pose learned from previous successful unlocks. On the very first
-   session they learn it from the best near-frontal matches. The learned
-   pose is limited to ±20° yaw and ±25° pitch from the camera. Turning away or closing your eyes can never be what unlocks
+   screen" means your head isn't turned away: its yaw (left/right) is
+   within 18° of how you faced the screen while enrolling. Tilting your
+   head up or down never blocks a face that matches, because a laptop
+   camera often sees you from a steep angle. A strongly tilted face that
+   doesn't match is ignored rather than counted as a failed look. Faces enrolled before this was recorded use a pose
+   learned from previous successful unlocks. On the very first session
+   they learn it from the best near-frontal matches. The learned pose is
+   limited to ±20° yaw from the camera. Turning away or closing your eyes can never be what unlocks
    it, even if earlier frames already proved liveness. The indicator says
    "Look at the screen" when the match is good but attention is missing.
 6. **Unlock**: it re-checks that your session's lock screen is the window in
@@ -135,7 +137,8 @@ Spotlight or Finder. Each step unlocks once the earlier ones are done:
 3. **Login password**: entered once and checked with macOS's directory
    service. It is stored only in your login Keychain.
 4. **Enrol your face**: confirm with your password, then follow the on-screen
-   prompts (look straight, sit back, lean in, and look slightly left, right, up and down: about 30 samples).
+   prompts (look straight, sit back, lean in, look slightly left, right, up and down, then tilt your head
+   further down and up: about 38 samples).
 5. **Test recognition**: a live preview with your match score, eye openness,
    head movement and liveness status. The step is ticked after a real *PASS*.
 6. **Turn on**: enable face unlock (asks for your password), with *Launch at

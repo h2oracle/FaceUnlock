@@ -58,7 +58,7 @@ struct EnrolmentView: View {
 
 /// Drives enrolment on the camera's video queue.
 final class EnrolmentRunner: @unchecked Sendable {
-    static let timeout: TimeInterval = 45
+    static let timeout: TimeInterval = 60 // 9 enrolment steps
 
     private let analyzer: FaceAnalyzer
     private var collector = EnrolmentCollector() // video queue only

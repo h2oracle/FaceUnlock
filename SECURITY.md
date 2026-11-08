@@ -28,12 +28,19 @@ has physical access to your Mac.
   movement is designed to reject flat photos but has been validated on
   simulated data only. Test it with a printed photo in the Test step.
 - Unlocking while you're not looking (e.g. turned away or eyes closed): the
-  final 5 matched frames must be attentive: within 18° of the owner's
-  screen-facing pose (enrolled, or learned from successful unlocks; clamped
-  to ±20° yaw and ±25° pitch from the camera axis), eyes open, and
-  score ≥ threshold + 0.05. The learned pose is stored in preferences. A
+  final 5 matched frames must be attentive: head not turned away (yaw
+  within 18° of the owner's screen-facing yaw, enrolled or learned from
+  successful unlocks and clamped to ±20° from the camera axis), eyes open,
+  and score ≥ threshold + 0.05. The learned pose is stored in preferences. A
   same-user process could change it, but only within that clamp and never
   past the score margin.
+  Head tilt (pitch, up/down) never blocks a face that matches, because a
+  laptop camera often sees the owner from a steep angle. A strongly tilted
+  face (beyond 20°) that doesn't match is ignored rather than counted as a
+  failed look, as with turned or cut-off faces. The trade-off: an owner
+  looking down (e.g. at a phone or the keyboard) with eyes open and their
+  face in camera view can unlock. Attention guards against turned-away
+  heads and closed eyes, not against looking down.
 - Repeated attempts at the lock screen. Failed looks are counted per scan
   (3, then a pause until input re-arms it) and per lock session (5), and covering the lens or adding a second face
   doesn't reset the count. A matching face that never passes liveness also

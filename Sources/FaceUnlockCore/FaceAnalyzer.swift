@@ -227,6 +227,12 @@ public final class FaceAnalyzer: @unchecked Sendable {
 /// Decides whether a single-face frame is good enough to count as either a
 /// match or a non-match. Bad angles, tiny or cut-off faces and low capture
 /// quality would otherwise turn the owner into "failed looks".
+///
+/// The gate only decides whether a NON-matching frame may count against the
+/// owner (reset evidence, add to failed looks). A matching frame counts as a
+/// match whatever its tilt or quality (UnlockEvaluator and ScanPolicy bypass
+/// the gate for matches), so a steep camera angle never blocks an unlock; a
+/// strongly tilted face that doesn't match is just ignored.
 public enum FrameQualityGate {
     public static let minimumQuality: Float = 0.25
     public static let maximumYaw: Double = 25

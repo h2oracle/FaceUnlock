@@ -16,6 +16,10 @@ public struct EnrolmentCollector: Sendable {
         Step(instruction: "Look slightly right", samples: 4),
         Step(instruction: "Look slightly up", samples: 4),
         Step(instruction: "Look slightly down", samples: 4),
+        // Bigger tilts, so recognition holds up when the camera sees the
+        // owner from a steep angle (tilt doesn't block attention).
+        Step(instruction: "Tilt your head down", samples: 4),
+        Step(instruction: "Tilt your head up", samples: 4),
     ]
 
     /// VNDetectFaceCaptureQualityRequest score below which frames are rejected.

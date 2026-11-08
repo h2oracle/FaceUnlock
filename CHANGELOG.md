@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Head tilt (pitch, up/down) never blocks a matching face: attention now
+  checks only that the head isn't turned away (yaw within 18° of the
+  screen-facing pose) and both eyes are open. Strongly tilted faces that
+  don't match are ignored rather than counted as failed looks. The session
+  baseline can now be learned from tilted frames too. Trade-off: looking down at a phone or keyboard with
+  eyes open in camera view can now unlock.
+- Enrolment adds "Tilt your head down" and "Tilt your head up" steps after
+  "Look slightly down" (about 38 samples), so recognition holds up at steep
+  camera angles. The enrolment timeout is now 60 s.
+
 ## 0.1.0 – 2026-11-07
 
 First public release.
